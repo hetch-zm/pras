@@ -33,6 +33,20 @@ const clearAuthToken = () => {
   localStorage.removeItem('userData');
 };
 
+// Helper for case-insensitive role comparison
+const hasRole = (userRole, ...allowedRoles) => {
+  if (!userRole) return false;
+  const normalizedUserRole = userRole.toLowerCase();
+  return allowedRoles.some(role => role.toLowerCase() === normalizedUserRole);
+};
+
+// Helper to check if user has any of the specified roles
+const hasAnyRole = (userRole, roles) => {
+  if (!userRole || !Array.isArray(roles)) return false;
+  const normalizedUserRole = userRole.toLowerCase();
+  return roles.some(role => role.toLowerCase() === normalizedUserRole);
+};
+
 // Helper to get headers with auth
 const getHeaders = () => {
   const headers = { 'Content-Type': 'application/json' };
@@ -138,16 +152,20 @@ const api = {
     return data;
   },
   
-  getRequisitions: async () => {
-    const res = await fetchWithAuth(`${API_URL}/requisitions`);
+  getRequisitions: async (userId, userRole) => {
+    const params = new URLSearchParams();
+    if (userId) params.append('user_id', userId);
+    if (userRole) params.append('role', userRole);
+    const queryString = params.toString();
+    const url = queryString ? `${API_URL}/requisitions?${queryString}` : `${API_URL}/requisitions`;
+    const res = await fetchWithAuth(url);
     if (!res.ok) throw new Error('Failed to fetch requisitions');
     return res.json();
   },
 
   createRequisition: async (data) => {
-    const res = await fetch(`${API_URL}/requisitions/simple`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/simple`, {
       method: 'POST',
-      headers: getHeaders(),
       body: JSON.stringify(data)
     });
     if (!res.ok) {
@@ -158,9 +176,8 @@ const api = {
   },
 
   updateRequisition: async (id, data) => {
-    const res = await fetch(`${API_URL}/requisitions/${id}`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${id}`, {
       method: 'PUT',
-      headers: getHeaders(),
       body: JSON.stringify(data)
     });
     if (!res.ok) throw new Error('Failed to update requisition');
@@ -168,17 +185,14 @@ const api = {
   },
 
   getUsers: async () => {
-    const res = await fetch(`${API_URL}/users`, {
-      headers: getHeaders()
-    });
+    const res = await fetchWithAuth(`${API_URL}/users`);
     if (!res.ok) throw new Error('Failed to fetch users');
     return res.json();
   },
 
   createUser: async (data) => {
-    const res = await fetch(`${API_URL}/users`, {
+    const res = await fetchWithAuth(`${API_URL}/users`, {
       method: 'POST',
-      headers: getHeaders(),
       body: JSON.stringify(data)
     });
     if (!res.ok) throw new Error('Failed to create user');
@@ -186,9 +200,8 @@ const api = {
   },
 
   deleteUser: async (id) => {
-    const res = await fetch(`${API_URL}/users/${id}`, {
-      method: 'DELETE',
-      headers: getHeaders()
+    const res = await fetchWithAuth(`${API_URL}/users/${id}`, {
+      method: 'DELETE'
     });
     if (!res.ok) throw new Error('Failed to delete user');
     return res.json();
@@ -201,9 +214,8 @@ const api = {
   },
 
   createVendor: async (data) => {
-    const res = await fetch(`${API_URL}/vendors`, {
+    const res = await fetchWithAuth(`${API_URL}/vendors`, {
       method: 'POST',
-      headers: getHeaders(),
       body: JSON.stringify(data)
     });
     if (!res.ok) throw new Error('Failed to create vendor');
@@ -211,9 +223,8 @@ const api = {
   },
 
   deleteVendor: async (id) => {
-    const res = await fetch(`${API_URL}/vendors/${id}`, {
-      method: 'DELETE',
-      headers: getHeaders()
+    const res = await fetchWithAuth(`${API_URL}/vendors/${id}`, {
+      method: 'DELETE'
     });
     if (!res.ok) throw new Error('Failed to delete vendor');
     return res.json();
@@ -232,21 +243,80 @@ const api = {
     return res.blob();
   },
 
-  downloadRequisitionPDF: async (reqId) => {
+  // COMMENTED OUT: DEPARTMENTAL REQUEST PDF (Report 2) - Not needed
+  /* downloadRequisitionPDF: async (reqId) => {
     const res = await fetchWithAuth(`${API_URL}/requisitions/${reqId}/pdf`);
     if (!res.ok) {
       const errorText = await res.text();
       throw new Error(errorText || 'Failed to download Requisition PDF');
     }
     return res.blob();
+  }, */
+
+  // NEW: Download Approved Purchase Requisition PDF (Report 1) after full approval chain
+  // This function now gets the PO ID from requisition ID first, then downloads the PO PDF
+  downloadRequisitionPDF: async (reqId) => {
+    // First, get the purchase order for this requisition
+    const poRes = await fetchWithAuth(`${API_URL}/purchase-orders/by-requisition/${reqId}`);
+    if (!poRes.ok) {
+      const errorText = await poRes.text();
+      throw new Error(errorText || 'Purchase order not found for this requisition');
+    }
+    const po = await poRes.json();
+
+    // Now download the PO PDF
+    const res = await fetchWithAuth(`${API_URL}/purchase-orders/${po.id}/pdf`);
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(errorText || 'Failed to download Approved Purchase Requisition PDF');
+    }
+    return res.blob();
   },
 
   getDepartments: async () => {
-    const res = await fetch(`${API_URL}/departments`, {
-      headers: getHeaders()
-    });
+    const res = await fetchWithAuth(`${API_URL}/departments`);
     if (!res.ok) throw new Error('Failed to fetch departments');
     return res.json();
+  },
+
+  // ============================================
+  // FORMS API - EFT, PETTY CASH, EXPENSE CLAIMS
+  // ============================================
+
+  getExpenseClaims: async () => {
+    const res = await fetchWithAuth(`${API_URL}/forms/expense-claims`);
+    if (!res.ok) throw new Error('Failed to fetch expense claims');
+    return res.json();
+  },
+
+  getEFTRequisitions: async () => {
+    const res = await fetchWithAuth(`${API_URL}/forms/eft-requisitions`);
+    if (!res.ok) throw new Error('Failed to fetch EFT requisitions');
+    return res.json();
+  },
+
+  getPettyCashRequisitions: async () => {
+    const res = await fetchWithAuth(`${API_URL}/forms/petty-cash-requisitions`);
+    if (!res.ok) throw new Error('Failed to fetch petty cash requisitions');
+    return res.json();
+  },
+
+  downloadExpenseClaimPDF: async (claimId) => {
+    const res = await fetchWithAuth(`${API_URL}/forms/expense-claims/${claimId}/pdf`);
+    if (!res.ok) throw new Error('Failed to download expense claim PDF');
+    return res.blob();
+  },
+
+  downloadEFTRequisitionPDF: async (eftId) => {
+    const res = await fetchWithAuth(`${API_URL}/forms/eft-requisitions/${eftId}/pdf`);
+    if (!res.ok) throw new Error('Failed to download EFT requisition PDF');
+    return res.blob();
+  },
+
+  downloadPettyCashPDF: async (pettyCashId) => {
+    const res = await fetchWithAuth(`${API_URL}/forms/petty-cash-requisitions/${pettyCashId}/pdf`);
+    if (!res.ok) throw new Error('Failed to download petty cash PDF');
+    return res.blob();
   },
 
   // ============================================
@@ -300,6 +370,14 @@ const api = {
   // BUDGET API - COMPLETE
   // ============================================
 
+  getAllDepartmentsWithBudgets: async (fiscalYear) => {
+    const res = await fetch(`${API_URL}/budgets/all-departments?fiscal_year=${fiscalYear}`, {
+      headers: getHeaders()
+    });
+    if (!res.ok) throw new Error('Failed to fetch departments with budgets');
+    return res.json();
+  },
+
   getBudgetOverview: async (fiscalYear) => {
     const res = await fetch(`${API_URL}/budgets/overview?fiscal_year=${fiscalYear}`, {
       headers: getHeaders()
@@ -316,6 +394,19 @@ const api = {
     return res.json();
   },
 
+  createBudget: async (department, allocatedAmount, fiscalYear) => {
+    const res = await fetch(`${API_URL}/budgets/create`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ department, allocated_amount: allocatedAmount, fiscal_year: fiscalYear })
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || 'Failed to create budget');
+    }
+    return res.json();
+  },
+
   updateBudgetAllocation: async (budgetId, amount) => {
     const res = await fetch(`${API_URL}/budgets/${budgetId}/allocate`, {
       method: 'PUT',
@@ -327,9 +418,8 @@ const api = {
   },
 
   budgetCheck: async (requisitionId, approved, comments) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/budget-check`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/budget-check`, {
       method: 'POST',
-      headers: getHeaders(),
       body: JSON.stringify({ approved, comments })
     });
     if (!res.ok) throw new Error('Failed to perform budget check');
@@ -341,9 +431,8 @@ const api = {
   // ============================================
 
   addRequisitionItem: async (requisitionId, item) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/items`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/items`, {
       method: 'POST',
-      headers: getHeaders(),
       body: JSON.stringify(item)
     });
     if (!res.ok) throw new Error('Failed to add item');
@@ -351,9 +440,8 @@ const api = {
   },
 
   updateRequisitionItem: async (requisitionId, itemId, item) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/items/${itemId}`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/items/${itemId}`, {
       method: 'PUT',
-      headers: getHeaders(),
       body: JSON.stringify(item)
     });
     if (!res.ok) throw new Error('Failed to update item');
@@ -361,18 +449,16 @@ const api = {
   },
 
   deleteRequisitionItem: async (requisitionId, itemId) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/items/${itemId}`, {
-      method: 'DELETE',
-      headers: getHeaders()
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/items/${itemId}`, {
+      method: 'DELETE'
     });
     if (!res.ok) throw new Error('Failed to delete item');
     return res.json();
   },
 
   updateRequisitionFields: async (requisitionId, fields) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/update-fields`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/update-fields`, {
       method: 'PUT',
-      headers: getHeaders(),
       body: JSON.stringify(fields)
     });
     if (!res.ok) throw new Error('Failed to update fields');
@@ -384,9 +470,8 @@ const api = {
   // ============================================
 
   submitRequisition: async (requisitionId, userId, selectedHodId = null) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/submit`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/submit`, {
       method: 'PUT',
-      headers: getHeaders(),
       body: JSON.stringify({ user_id: userId, selected_hod_id: selectedHodId })
     });
     if (!res.ok) throw new Error('Failed to submit requisition');
@@ -394,9 +479,8 @@ const api = {
   },
 
   hodApprove: async (requisitionId, approved, comments, userId) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/hod-approve`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/hod-approve`, {
       method: 'PUT',
-      headers: getHeaders(),
       body: JSON.stringify({ user_id: userId, approve: approved, comments })
     });
     if (!res.ok) throw new Error('Failed to process HOD approval');
@@ -404,9 +488,8 @@ const api = {
   },
 
   financeApprove: async (requisitionId, approved, comments, userId) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/finance-approve`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/finance-approve`, {
       method: 'PUT',
-      headers: getHeaders(),
       body: JSON.stringify({ user_id: userId, approve: approved, comments })
     });
     if (!res.ok) throw new Error('Failed to process finance approval');
@@ -414,9 +497,8 @@ const api = {
   },
 
   mdApprove: async (requisitionId, approved, comments, userId) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/md-approve`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/md-approve`, {
       method: 'PUT',
-      headers: getHeaders(),
       body: JSON.stringify({ user_id: userId, approve: approved, comments })
     });
     if (!res.ok) throw new Error('Failed to process MD approval');
@@ -424,9 +506,8 @@ const api = {
   },
 
   completeProcurement: async (requisitionId, comments, procurementAssignedTo) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/procurement`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/procurement`, {
       method: 'PUT',
-      headers: getHeaders(),
       body: JSON.stringify({
         comments,
         procurement_assigned_to: procurementAssignedTo
@@ -437,19 +518,19 @@ const api = {
   },
 
   redirectRequisition: async (requisitionId, newApproverId, reason) => {
-    const res = await fetch(`${API_URL}/requisitions/${requisitionId}/redirect`, {
+    const res = await fetchWithAuth(`${API_URL}/requisitions/${requisitionId}/redirect`, {
       method: 'POST',
-      headers: getHeaders(),
       body: JSON.stringify({ new_approver_id: newApproverId, reason })
     });
     if (!res.ok) throw new Error('Failed to redirect requisition');
     return res.json();
   },
 
-  getRequisitionPDF: async (requisitionId) => {
+  // COMMENTED OUT: DEPARTMENTAL REQUEST PDF (Report 2) - Not needed
+  /* getRequisitionPDF: async (requisitionId) => {
     const token = getAuthToken();
     window.open(`${API_URL}/requisitions/${requisitionId}/pdf?token=${token}`, '_blank');
-  },
+  }, */
 
   // ============================================
   // ADMIN API
@@ -624,11 +705,12 @@ const api = {
     window.open(`${API_URL}/reports/fx-rates/excel`, '_blank');
   },
 
-  downloadDepartmentPDF: (department, fiscalYear) => {
+  // COMMENTED OUT: Departmental PDF download - not needed
+  /* downloadDepartmentPDF: (department, fiscalYear) => {
     const params = new URLSearchParams({ fiscal_year: fiscalYear });
     const token = getAuthToken();
     window.open(`${API_URL}/reports/department/${department}/pdf?${params}`, '_blank');
-  },
+  }, */
 
   // ============================================
   // QUOTES AND ADJUDICATIONS API
@@ -953,6 +1035,24 @@ const api = {
       if (!res.ok) throw new Error('Failed to export data');
       return res.json();
     }
+  },
+
+  // ============================================
+  // GLOBAL SEARCH
+  // ============================================
+  globalSearch: async (query) => {
+    if (!query || query.length < 3) {
+      return {
+        requisitions: [],
+        efts: [],
+        expense_claims: [],
+        users: []
+      };
+    }
+
+    const res = await fetchWithAuth(`${API_URL}/search?q=${encodeURIComponent(query)}`);
+    if (!res.ok) throw new Error('Search failed');
+    return res.json();
   }
 };
 
@@ -964,7 +1064,10 @@ function App() {
     requisitions: [],
     users: [],
     vendors: [],
-    departments: []
+    departments: [],
+    expenseClaims: [],
+    eftRequisitions: [],
+    pettyCashRequisitions: []
   });
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -1004,14 +1107,20 @@ function App() {
   const loadData = async () => {
     setLoading(true);
     try {
-      // Only load endpoints that exist in the backend
-      const [requisitions, vendors] = await Promise.all([
-        api.getRequisitions(),
-        api.getVendors()
+      // Load all requisition types (purchase requisitions and forms)
+      const [requisitions, vendors, expenseClaims, eftRequisitions, pettyCashRequisitions] = await Promise.all([
+        api.getRequisitions(currentUser?.id, currentUser?.role),
+        api.getVendors(),
+        api.getExpenseClaims(),
+        api.getEFTRequisitions(),
+        api.getPettyCashRequisitions()
       ]);
       setData({
         requisitions,
         vendors,
+        expenseClaims,
+        eftRequisitions,
+        pettyCashRequisitions,
         users: [], // Not implemented yet
         departments: [] // Not implemented yet
       });
@@ -1061,7 +1170,10 @@ function App() {
       requisitions: [],
       users: [],
       vendors: [],
-      departments: []
+      departments: [],
+      expenseClaims: [],
+      eftRequisitions: [],
+      pettyCashRequisitions: []
     });
   };
 
@@ -1112,7 +1224,7 @@ function App() {
   },
     React.createElement(Sidebar, { user: currentUser, logout, setView, view }),
     React.createElement('div', { className: "flex-1" },
-      React.createElement(TopBar, { user: currentUser }),
+      React.createElement(TopBar, { user: currentUser, logout }),
       React.createElement('div', { className: "container mx-auto px-6 py-6" },
         view === 'dashboard' && React.createElement(Dashboard, { user: currentUser, data, setView, setSelectedReq, loadData }),
         view === 'requisitions' && React.createElement(Dashboard, { user: currentUser, data, setView, setSelectedReq, loadData }),
@@ -1126,7 +1238,13 @@ function App() {
         view === 'fx-rates' && React.createElement(FXRatesManagement, { user: currentUser }),
         view === 'reports' && React.createElement(Reports, { data }),
         view === 'analytics' && React.createElement(AnalyticsDashboard, { user: currentUser }),
-        view === 'quotes-adjudication' && React.createElement(QuotesAndAdjudication, { user: currentUser, setView, loadData })
+        view === 'quotes-adjudication' && React.createElement(QuotesAndAdjudication, { user: currentUser, setView, loadData }),
+        view === 'expense-claims' && React.createElement(ExpenseClaimsList, { user: currentUser, setView, setSelectedReq }),
+        view === 'create-expense-claim' && React.createElement(CreateExpenseClaim, { user: currentUser, setView }),
+        view === 'approve-expense-claim' && React.createElement(ApproveExpenseClaim, { claim: selectedReq, user: currentUser, setView }),
+        view === 'eft-requisitions' && React.createElement(EFTRequisitionsList, { user: currentUser, setView, setSelectedReq }),
+        view === 'create-eft-requisition' && React.createElement(CreateEFTRequisition, { user: currentUser, setView }),
+        view === 'approve-eft-requisition' && React.createElement(ApproveEFTRequisition, { requisition: selectedReq, user: currentUser, setView })
       )
     )
   );
@@ -1453,7 +1571,7 @@ function ThemeToggle() {
 }
 
 // Sidebar Component - Left Navigation
-function Sidebar({ user, logout, setView, view }) {
+function Sidebar({ user, logout, setView, view, setSelectedReq }) {
   const [expandedMenus, setExpandedMenus] = useState({});
 
   const toggleMenu = (menuId) => {
@@ -1461,35 +1579,62 @@ function Sidebar({ user, logout, setView, view }) {
   };
 
   const menuItems = [
-    { id: 'requisitions', label: 'Requisitions', icon: '📋', show: true },
-    { id: 'create', label: 'Create Requisition', icon: '➕', show: user.role === 'initiator' || user.role === 'procurement' },
+    // Procurement Group - All requisition-related items
     {
-      id: 'approval-console-group',
-      label: 'Approval Console',
-      icon: '✅',
-      show: ['hod', 'procurement', 'finance', 'md', 'admin'].includes(user.role),
+      id: 'procurement-group',
+      label: 'Procurement',
+      icon: '🛒',
+      show: true,
       isGroup: true,
       children: [
-        { id: 'approval-console', label: 'Pending Requisitions', icon: '⏳', show: ['hod', 'finance', 'md', 'admin'].includes(user.role) },
-        { id: 'purchase-orders', label: 'Approved Requisitions', icon: '✓', show: ['initiator', 'hod', 'procurement', 'finance', 'md', 'admin'].includes(user.role) },
-        { id: 'rejected', label: 'Rejected Requisitions', icon: '❌', show: user.role === 'procurement' || user.role === 'admin' }
+        { id: 'requisitions', label: 'My Requisitions', icon: '📋', show: true },
+        { id: 'create', label: 'Create Requisition', icon: '➕', show: hasRole(user.role, 'initiator', 'procurement') },
+        { id: 'approval-console', label: 'Pending Approvals', icon: '⏳', show: hasAnyRole(user.role, ['hod', 'finance', 'md', 'admin']) },
+        { id: 'purchase-orders', label: 'Approved Requisitions', icon: '✓', show: hasAnyRole(user.role, ['initiator', 'hod', 'procurement', 'finance', 'md', 'admin']) },
+        { id: 'rejected', label: 'Rejected Requisitions', icon: '❌', show: hasRole(user.role, 'procurement', 'admin') },
+        { id: 'quotes-adjudication', label: 'Adjudication', icon: '⚖️', show: hasRole(user.role, 'procurement', 'finance', 'md', 'admin') }
       ]
     },
+    // Financial Forms Group - All form-related items
+    {
+      id: 'forms-group',
+      label: 'Financial Forms',
+      icon: '💳',
+      show: true,
+      isGroup: true,
+      children: [
+        { id: 'create-expense-claim', label: 'New Expense Claim', icon: '📋', show: true, isLink: true, href: 'expense-claim.html' },
+        { id: 'create-eft-requisition', label: 'New EFT Requisition', icon: '💳', show: true, isLink: true, href: 'eft-requisition.html' },
+        { id: 'create-petty-cash', label: 'New Petty Cash', icon: '💰', show: true, isLink: true, href: 'petty-cash-requisition.html' },
+        { id: 'forms-approval', label: 'Forms Approval', icon: '✅', show: hasRole(user.role, 'hod', 'finance', 'md', 'admin'), isLink: true, href: 'forms-dashboard.html' }
+      ]
+    },
+    // Financial Planning Group - Budget and FX rates
     {
       id: 'fin-planning-group',
-      label: 'Fin. Planning',
+      label: 'Financial Planning',
       icon: '💼',
-      show: user.role === 'finance' || user.role === 'md' || user.role === 'admin',
+      show: hasRole(user.role, 'finance', 'md', 'admin'),
       isGroup: true,
       children: [
-        { id: 'budget', label: 'Budgets', icon: '💰', show: user.role === 'finance' || user.role === 'md' || user.role === 'admin' },
-        { id: 'fx-rates', label: 'FX Rates', icon: '💱', show: user.role === 'finance' || user.role === 'md' || user.role === 'procurement' || user.role === 'admin' }
+        { id: 'budget', label: 'Budgets', icon: '💰', show: hasRole(user.role, 'finance', 'md', 'admin') },
+        { id: 'fx-rates', label: 'FX Rates', icon: '💱', show: hasRole(user.role, 'finance', 'md', 'procurement', 'admin') }
       ]
     },
-    { id: 'quotes-adjudication', label: 'Quotes & Adjudication', icon: '📝', show: user.role === 'procurement' || user.role === 'finance' || user.role === 'md' || user.role === 'admin' },
-    { id: 'reports', label: 'Reports', icon: '📈', show: true, disabled: user.role === 'initiator' },
-    { id: 'analytics', label: 'Analytics', icon: '📊', show: user.role === 'finance' || user.role === 'md' || user.role === 'admin' },
-    { id: 'admin', label: 'Admin Panel', icon: '⚙️', show: user.role === 'admin' }
+    // Reports & Analytics Group
+    {
+      id: 'insights-group',
+      label: 'Reports & Analytics',
+      icon: '📊',
+      show: !hasRole(user.role, 'initiator'), // Hide entire group from initiators
+      isGroup: true,
+      children: [
+        { id: 'reports', label: 'Reports', icon: '📈', show: true },
+        { id: 'analytics', label: 'Analytics', icon: '📊', show: hasRole(user.role, 'finance', 'md', 'admin') }
+      ]
+    },
+    // Admin Panel
+    { id: 'admin', label: 'Administration', icon: '⚙️', show: hasRole(user.role, 'admin') }
   ];
 
   return React.createElement('aside', {
@@ -1513,6 +1658,11 @@ function Sidebar({ user, logout, setView, view }) {
         className: "text-xs mt-1 transition-colors",
         style: { color: 'var(--text-tertiary)' }
       }, "System")
+    ),
+
+    // Global Search Bar
+    React.createElement('div', { className: "px-4 pb-4" },
+      React.createElement(GlobalSearch, { setView, setSelectedReq })
     ),
 
     // Navigation Menu - with flex-1 to push user section to bottom
@@ -1549,32 +1699,52 @@ function Sidebar({ user, logout, setView, view }) {
             // Children - shown when expanded
             isExpanded && React.createElement('div', { className: "ml-4 mt-1 space-y-1" },
               item.children.filter(child => child.show).map(child =>
-                React.createElement('button', {
-                  key: child.id,
-                  onClick: () => setView(child.id),
-                  className: "w-full flex items-center gap-3 px-4 py-2 rounded-lg text-sm font-medium transition-all",
-                  style: view === child.id ? {
-                    backgroundColor: 'var(--color-primary)',
-                    color: '#FFFFFF',
-                    boxShadow: 'var(--shadow-sm)'
-                  } : {
-                    color: 'var(--text-secondary)',
-                    backgroundColor: 'transparent'
-                  },
-                  onMouseEnter: (e) => {
-                    if (view !== child.id) {
+                child.isLink ?
+                  React.createElement('a', {
+                    key: child.id,
+                    href: child.href,
+                    className: "w-full flex items-center gap-3 px-4 py-2 rounded-lg text-sm font-medium transition-all",
+                    style: {
+                      color: 'var(--text-secondary)',
+                      backgroundColor: 'transparent',
+                      textDecoration: 'none'
+                    },
+                    onMouseEnter: (e) => {
                       e.currentTarget.style.backgroundColor = 'var(--bg-hover)';
-                    }
-                  },
-                  onMouseLeave: (e) => {
-                    if (view !== child.id) {
+                    },
+                    onMouseLeave: (e) => {
                       e.currentTarget.style.backgroundColor = 'transparent';
                     }
-                  }
-                },
-                  React.createElement('span', null, child.icon),
-                  React.createElement('span', null, child.label)
-                )
+                  },
+                    React.createElement('span', null, child.icon),
+                    React.createElement('span', null, child.label)
+                  ) :
+                  React.createElement('button', {
+                    key: child.id,
+                    onClick: () => setView(child.id),
+                    className: "w-full flex items-center gap-3 px-4 py-2 rounded-lg text-sm font-medium transition-all",
+                    style: view === child.id ? {
+                      backgroundColor: 'var(--color-primary)',
+                      color: '#FFFFFF',
+                      boxShadow: 'var(--shadow-sm)'
+                    } : {
+                      color: 'var(--text-secondary)',
+                      backgroundColor: 'transparent'
+                    },
+                    onMouseEnter: (e) => {
+                      if (view !== child.id) {
+                        e.currentTarget.style.backgroundColor = 'var(--bg-hover)';
+                      }
+                    },
+                    onMouseLeave: (e) => {
+                      if (view !== child.id) {
+                        e.currentTarget.style.backgroundColor = 'transparent';
+                      }
+                    }
+                  },
+                    React.createElement('span', null, child.icon),
+                    React.createElement('span', null, child.label)
+                  )
               )
             )
           );
@@ -1616,12 +1786,12 @@ function Sidebar({ user, logout, setView, view }) {
       })
     ),
 
-    // User Info and Logout at bottom
+    // User Info at bottom
     React.createElement('div', {
       className: "p-4 border-t mt-auto transition-colors",
       style: { backgroundColor: 'var(--bg-secondary)' }
     },
-      React.createElement('div', { className: "mb-3" },
+      React.createElement('div', null,
         React.createElement('p', {
           className: "text-sm font-medium truncate transition-colors",
           style: { color: 'var(--text-primary)' }
@@ -1637,25 +1807,13 @@ function Sidebar({ user, logout, setView, view }) {
             color: 'var(--color-primary)'
           }
         }, user.role ? user.role.toUpperCase() : 'USER')
-      ),
-      // Theme Toggle
-      React.createElement('div', { className: "mb-3" },
-        React.createElement(ThemeToggle)
-      ),
-      React.createElement('button', {
-        onClick: logout,
-        className: "w-full px-4 py-2 text-white rounded-lg hover:opacity-90 transition-all text-sm font-medium",
-        style: {
-          backgroundColor: 'var(--color-danger)',
-          boxShadow: 'var(--shadow-sm)'
-        }
-      }, "🚪 Logout")
+      )
     )
   );
 }
 
 // Top Bar Component - User Info and Context
-function TopBar({ user }) {
+function TopBar({ user, logout }) {
   return React.createElement('div', {
     className: "px-6 py-4 transition-colors",
     style: {
@@ -1675,7 +1833,23 @@ function TopBar({ user }) {
           style: { color: 'var(--text-secondary)' }
         }, `Logged in as ${user.full_name || user.name} - ${user.role ? user.role.toUpperCase() : 'USER'}`)
       ),
-      React.createElement('div', { className: "text-right" },
+      React.createElement('div', { className: "flex flex-col items-end gap-2" },
+        // Logout button and Theme toggle row
+        React.createElement('div', { className: "flex items-center gap-3" },
+          React.createElement(ThemeToggle),
+          React.createElement('button', {
+            onClick: logout,
+            className: "px-4 py-2 text-white rounded-lg hover:opacity-90 transition-all text-sm font-medium flex items-center gap-2",
+            style: {
+              backgroundColor: 'var(--color-danger)',
+              boxShadow: 'var(--shadow-sm)'
+            }
+          },
+            React.createElement('span', null, '🚪'),
+            React.createElement('span', null, 'Logout')
+          )
+        ),
+        // Date and time below
         React.createElement('p', {
           className: "text-sm transition-colors",
           style: { color: 'var(--text-tertiary)' }
@@ -1687,6 +1861,242 @@ function TopBar({ user }) {
         }))
       )
     )
+  );
+}
+
+// ============================================
+// GLOBAL SEARCH COMPONENT
+// ============================================
+function GlobalSearch({ setView, setSelectedReq }) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showResults, setShowResults] = useState(false);
+
+  // Debounce search
+  useEffect(() => {
+    if (!searchQuery || searchQuery.length < 3) {
+      setSearchResults(null);
+      setShowResults(false);
+      return;
+    }
+
+    setIsSearching(true);
+    const timeoutId = setTimeout(async () => {
+      try {
+        const results = await api.globalSearch(searchQuery);
+        setSearchResults(results);
+        setShowResults(true);
+        setIsSearching(false);
+      } catch (error) {
+        console.error('Search error:', error);
+        setIsSearching(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timeoutId);
+  }, [searchQuery]);
+
+  const handleResultClick = (type, item) => {
+    setSearchQuery('');
+    setShowResults(false);
+
+    if (type === 'requisition') {
+      setSelectedReq(item);
+      setView('details');
+    } else if (type === 'eft') {
+      window.location.href = 'forms-dashboard.html';
+    } else if (type === 'expense_claim') {
+      window.location.href = 'forms-dashboard.html';
+    } else if (type === 'user') {
+      setView('admin');
+    }
+  };
+
+  const totalResults = searchResults ?
+    searchResults.requisitions.length +
+    searchResults.efts.length +
+    searchResults.expense_claims.length +
+    searchResults.users.length : 0;
+
+  return React.createElement('div', {
+    className: 'relative'
+  },
+    React.createElement('div', { className: 'relative' },
+      React.createElement('input', {
+        type: 'text',
+        placeholder: 'Search...',
+        value: searchQuery,
+        onChange: (e) => setSearchQuery(e.target.value),
+        onFocus: () => searchResults && setShowResults(true),
+        className: 'w-full px-4 py-2 pr-10 rounded-lg text-sm font-medium transition-all focus:outline-none',
+        style: {
+          color: 'var(--text-secondary)',
+          backgroundColor: 'var(--bg-secondary)',
+          border: '1px solid var(--border-color)'
+        },
+        onMouseEnter: (e) => {
+          if (!searchQuery) {
+            e.currentTarget.style.backgroundColor = 'var(--bg-hover)';
+          }
+        },
+        onMouseLeave: (e) => {
+          e.currentTarget.style.backgroundColor = 'var(--bg-secondary)';
+        }
+      }),
+      React.createElement('div', {
+        className: 'absolute right-3 top-2.5',
+        style: { color: 'var(--text-tertiary)' }
+      }, isSearching ? '⏳' : '🔍')
+    ),
+
+    showResults && searchResults && React.createElement('div', {
+      className: 'absolute top-full mt-2 w-full rounded-lg z-50',
+      style: {
+        maxHeight: '500px',
+        overflowY: 'auto',
+        backgroundColor: 'var(--bg-primary)',
+        border: '1px solid var(--border-color)',
+        boxShadow: 'var(--shadow-xl)'
+      }
+    },
+      totalResults === 0 ?
+        React.createElement('div', {
+          className: 'p-4 text-center text-sm',
+          style: { color: 'var(--text-tertiary)' }
+        }, 'No results found') :
+        React.createElement('div', { className: 'py-2' },
+          searchResults.requisitions.length > 0 && React.createElement('div', null,
+            React.createElement('div', {
+              className: 'px-4 py-2 text-xs font-semibold uppercase',
+              style: {
+                color: 'var(--text-tertiary)',
+                backgroundColor: 'var(--bg-secondary)',
+                borderBottom: '1px solid var(--border-color)'
+              }
+            }, `Requisitions (${searchResults.requisitions.length})`),
+            searchResults.requisitions.map(req =>
+              React.createElement('div', {
+                key: req.id,
+                className: 'px-4 py-3 cursor-pointer transition-colors',
+                style: {
+                  borderBottom: '1px solid var(--border-color)'
+                },
+                onClick: () => handleResultClick('requisition', req),
+                onMouseEnter: (e) => {
+                  e.currentTarget.style.backgroundColor = 'var(--bg-hover)';
+                },
+                onMouseLeave: (e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                }
+              },
+                React.createElement('div', {
+                  className: 'font-medium text-sm',
+                  style: { color: 'var(--text-primary)' }
+                }, req.id),
+                React.createElement('div', {
+                  className: 'text-xs mt-1',
+                  style: { color: 'var(--text-secondary)' }
+                },
+                  req.description ? req.description.substring(0, 60) + '...' : 'No description'
+                ),
+                React.createElement('div', {
+                  className: 'text-xs mt-1',
+                  style: { color: 'var(--text-tertiary)' }
+                },
+                  `${req.initiator_name || 'Unknown'} • ${req.department || 'Unknown'}`
+                )
+              )
+            )
+          ),
+
+          searchResults.efts.length > 0 && React.createElement('div', null,
+            React.createElement('div', {
+              className: 'px-4 py-2 text-xs font-semibold uppercase',
+              style: {
+                color: 'var(--text-tertiary)',
+                backgroundColor: 'var(--bg-secondary)',
+                borderBottom: '1px solid var(--border-color)'
+              }
+            }, `EFT Requisitions (${searchResults.efts.length})`),
+            searchResults.efts.map(eft =>
+              React.createElement('div', {
+                key: eft.id,
+                className: 'px-4 py-3 cursor-pointer transition-colors',
+                style: { borderBottom: '1px solid var(--border-color)' },
+                onClick: () => handleResultClick('eft', eft),
+                onMouseEnter: (e) => { e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; },
+                onMouseLeave: (e) => { e.currentTarget.style.backgroundColor = 'transparent'; }
+              },
+                React.createElement('div', { className: 'font-medium text-sm', style: { color: 'var(--text-primary)' } }, eft.id),
+                React.createElement('div', { className: 'text-xs mt-1', style: { color: 'var(--text-secondary)' } },
+                  eft.payee_name || 'Unknown payee'
+                ),
+                React.createElement('div', { className: 'text-xs mt-1', style: { color: 'var(--text-tertiary)' } },
+                  `${eft.initiator_name || 'Unknown'} • ${eft.department || 'Unknown'}`
+                )
+              )
+            )
+          ),
+
+          searchResults.expense_claims.length > 0 && React.createElement('div', null,
+            React.createElement('div', {
+              className: 'px-4 py-2 text-xs font-semibold uppercase',
+              style: { color: 'var(--text-tertiary)', backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }
+            }, `Expense Claims (${searchResults.expense_claims.length})`),
+            searchResults.expense_claims.map(claim =>
+              React.createElement('div', {
+                key: claim.id,
+                className: 'px-4 py-3 cursor-pointer transition-colors',
+                style: { borderBottom: '1px solid var(--border-color)' },
+                onClick: () => handleResultClick('expense_claim', claim),
+                onMouseEnter: (e) => { e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; },
+                onMouseLeave: (e) => { e.currentTarget.style.backgroundColor = 'transparent'; }
+              },
+                React.createElement('div', { className: 'font-medium text-sm', style: { color: 'var(--text-primary)' } }, claim.id),
+                React.createElement('div', { className: 'text-xs mt-1', style: { color: 'var(--text-secondary)' } },
+                  claim.employee_name || 'Unknown employee'
+                ),
+                React.createElement('div', { className: 'text-xs mt-1', style: { color: 'var(--text-tertiary)' } },
+                  `${claim.reason_for_trip || 'No reason'} • ${claim.department || 'Unknown'}`
+                )
+              )
+            )
+          ),
+
+          searchResults.users.length > 0 && React.createElement('div', null,
+            React.createElement('div', {
+              className: 'px-4 py-2 text-xs font-semibold uppercase',
+              style: { color: 'var(--text-tertiary)', backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }
+            }, `Users (${searchResults.users.length})`),
+            searchResults.users.map(user =>
+              React.createElement('div', {
+                key: user.id,
+                className: 'px-4 py-3 cursor-pointer transition-colors',
+                style: { borderBottom: '1px solid var(--border-color)' },
+                onClick: () => handleResultClick('user', user),
+                onMouseEnter: (e) => { e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; },
+                onMouseLeave: (e) => { e.currentTarget.style.backgroundColor = 'transparent'; }
+              },
+                React.createElement('div', { className: 'font-medium text-sm', style: { color: 'var(--text-primary)' } },
+                  user.full_name || user.name || user.username
+                ),
+                React.createElement('div', { className: 'text-xs mt-1', style: { color: 'var(--text-secondary)' } },
+                  `@${user.username} • ${user.role || 'Unknown role'}`
+                ),
+                React.createElement('div', { className: 'text-xs mt-1', style: { color: 'var(--text-tertiary)' } },
+                  user.department || 'No department'
+                )
+              )
+            )
+          )
+        )
+    ),
+
+    showResults && React.createElement('div', {
+      className: 'fixed inset-0 z-40',
+      onClick: () => setShowResults(false)
+    })
   );
 }
 
@@ -1706,7 +2116,7 @@ function Header({ user, logout, setView, view }) {
             onClick: () => setView('dashboard'),
             className: `px-4 py-2 rounded-lg font-medium transition-colors ${view === 'dashboard' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`
           }, "Dashboard"),
-          user.role === 'initiator' && React.createElement('button', {
+          hasRole(user.role, 'initiator') && React.createElement('button', {
             onClick: () => setView('create'),
             className: `px-4 py-2 rounded-lg font-medium transition-colors ${view === 'create' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`
           }, "Create Requisition"),
@@ -1743,32 +2153,99 @@ function Header({ user, logout, setView, view }) {
   );
 }
 
-function Dashboard({ user, data, setView, setSelectedReq }) {
+function Dashboard({ user, data, setView, setSelectedReq, loadData }) {
   const [showBreakdown, setShowBreakdown] = useState(null); // 'total', 'pending', 'approved', or null
+  const [showPdfPreview, setShowPdfPreview] = useState(false);
+  const [previewPdfUrl, setPreviewPdfUrl] = useState(null);
+  const [previewPdfTitle, setPreviewPdfTitle] = useState('');
+  const [showAdminReroute, setShowAdminReroute] = useState(false);
+  const [rerouteForm, setRerouteForm] = useState(null);
+  const [availableUsers, setAvailableUsers] = useState([]);
+  const [selectedUserId, setSelectedUserId] = useState('');
+  const [rerouteReason, setRerouteReason] = useState('');
+  const [showUserSelection, setShowUserSelection] = useState(false);
 
   const getRequisitionsForUser = () => {
+    let filtered;
     switch (user.role) {
       case 'initiator':
-        return data.requisitions.filter(r => r.created_by === user.id);
+        // Initiators see only their own requisitions
+        filtered = data.requisitions.filter(r => r.created_by === user.id);
+        break;
       case 'hod':
-        return data.requisitions.filter(r => r.department === user.department && r.status === 'pending_hod');
+        // HODs see ALL requisitions from their department (not just pending_hod)
+        filtered = data.requisitions.filter(r => r.department === user.department);
+        break;
       case 'procurement':
-        return data.requisitions.filter(r => r.status === 'pending_procurement');
+        // Procurement sees ALL requisitions (they manage all procurement)
+        filtered = data.requisitions;
+        break;
       case 'finance':
-        return data.requisitions.filter(r => r.status === 'pending_finance');
+        // Finance sees ALL requisitions
+        filtered = data.requisitions;
+        break;
       case 'md':
-        return data.requisitions.filter(r => r.status === 'pending_md');
+        // MD sees ALL requisitions
+        filtered = data.requisitions;
+        break;
       case 'admin':
-        return data.requisitions;
+        // Admin sees ALL requisitions
+        filtered = data.requisitions;
+        break;
       default:
-        return [];
+        filtered = [];
     }
+    // Add formType to purchase requisitions for consistent handling
+    return filtered.map(r => ({...r, formType: 'purchase_requisition', displayType: 'Purchase Requisition'}));
+  };
+
+  // Get all forms for the user (EFT, Petty Cash, Expense Claims)
+  const getAllFormsForUser = () => {
+    const expenseClaims = (data.expenseClaims || []).filter(c =>
+      user.role === 'initiator' ? c.initiator_id === user.id : true
+    ).map(c => ({...c, formType: 'expense_claim', displayType: 'Expense Claim'}));
+
+    const eftReqs = (data.eftRequisitions || []).filter(r =>
+      user.role === 'initiator' ? r.initiator_id === user.id : true
+    ).map(r => ({...r, formType: 'eft', displayType: 'EFT Requisition'}));
+
+    const pettyCash = (data.pettyCashRequisitions || []).filter(r =>
+      user.role === 'initiator' ? r.initiator_id === user.id : true
+    ).map(r => ({...r, formType: 'petty_cash', displayType: 'Petty Cash'}));
+
+    return [...expenseClaims, ...eftReqs, ...pettyCash];
+  };
+
+  // Helper function to check if a form is approved (any approval status)
+  const isApproved = (status) => {
+    return status === 'approved' ||
+           status === 'completed' ||
+           status === 'hod_approved' ||
+           status === 'finance_approved' ||
+           status === 'md_approved';
   };
 
   const requisitions = getRequisitionsForUser();
-  const pendingApprovals = requisitions.filter(r => r.status.includes('pending')).length;
-  const pendingRequisitions = requisitions.filter(r => r.status.includes('pending'));
-  const approvedRequisitions = requisitions.filter(r => r.status === 'approved');
+  const allForms = getAllFormsForUser();
+
+  // Combine ALL requisitions (Purchase + EFT + Petty Cash + Expense Claims)
+  const allRequisitions = [...requisitions, ...allForms];
+
+  // Pending: ALL forms with pending status
+  const pendingPurchaseReqs = requisitions.filter(r => r.status.includes('pending'));
+  const pendingForms = allForms.filter(f => f.status.includes('pending'));
+  const pendingRequisitions = [...pendingPurchaseReqs, ...pendingForms];
+  const pendingApprovals = pendingRequisitions.length;
+
+  // Approved: Purchase Requisitions + ALL approved forms (includes partial approvals)
+  const approvedPurchaseRequisitions = requisitions.filter(r => isApproved(r.status));
+  const approvedForms = allForms.filter(f => isApproved(f.status));
+  const approvedRequisitions = [...approvedPurchaseRequisitions, ...approvedForms];
+
+  // Rejected: Purchase Requisitions + ALL rejected forms
+  const rejectedPurchaseRequisitions = requisitions.filter(r => r.status === 'rejected');
+  const rejectedForms = allForms.filter(f => f.status === 'rejected');
+  const rejectedRequisitions = [...rejectedPurchaseRequisitions, ...rejectedForms];
 
   const getStatusColor = (status) => {
     const colors = {
@@ -1778,6 +2255,10 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
       pending_finance: 'bg-purple-100 text-purple-700',
       pending_md: 'bg-orange-100 text-orange-700',
       approved: 'bg-green-100 text-green-700',
+      completed: 'bg-green-100 text-green-700',
+      hod_approved: 'bg-green-100 text-green-700',
+      finance_approved: 'bg-green-100 text-green-700',
+      md_approved: 'bg-green-100 text-green-700',
       rejected: 'bg-red-100 text-red-700'
     };
     return colors[status] || 'bg-gray-100 text-gray-700';
@@ -1791,6 +2272,10 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
       pending_finance: 'Pending Finance',
       pending_md: 'Pending MD',
       approved: 'Approved',
+      completed: 'Approved',
+      hod_approved: 'HOD Approved',
+      finance_approved: 'Finance Approved',
+      md_approved: 'MD Approved',
       rejected: 'Rejected'
     };
     return text[status] || status;
@@ -1799,6 +2284,263 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
   const handleViewReq = (req) => {
     setSelectedReq(req);
     setView('approve');
+  };
+
+  // Handle inline approval/rejection for all form types
+  const handleQuickAction = async (form, action) => {
+    const comment = action === 'reject'
+      ? prompt('Please provide a reason for rejection:')
+      : 'Approved';
+
+    if (action === 'reject' && !comment) {
+      alert('Rejection reason is required');
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to ${action} this ${form.displayType || 'form'}?`)) {
+      return;
+    }
+
+    try {
+      let endpoint = '';
+      let requestBody = {};
+
+      // Purchase Requisitions use different endpoint structure
+      if (form.formType === 'purchase_requisition') {
+        // Purchase Requisitions use role-specific approve endpoints
+        if (user.role === 'hod') {
+          endpoint = `${API_URL}/requisitions/${form.id}/hod-approve`;
+        } else if (user.role === 'finance') {
+          endpoint = `${API_URL}/requisitions/${form.id}/finance-approve`;
+        } else if (user.role === 'md') {
+          endpoint = `${API_URL}/requisitions/${form.id}/md-approve`;
+        } else if (user.role === 'procurement') {
+          endpoint = `${API_URL}/requisitions/${form.id}/procurement-action`;
+        }
+
+        // Purchase Requisitions use 'approved' boolean instead of 'action'
+        requestBody = {
+          user_id: user.id,
+          approved: action === 'approve',
+          comments: comment
+        };
+      } else {
+        // Forms (EFT, Petty Cash, Expense Claims) use action-based endpoints
+        let roleEndpoint = '';
+
+        if (user.role === 'hod') {
+          roleEndpoint = 'hod-action';
+        } else if (user.role === 'finance') {
+          roleEndpoint = 'finance-action';
+        } else if (user.role === 'md') {
+          roleEndpoint = 'md-action';
+        }
+
+        // Determine form type endpoint
+        if (form.formType === 'expense_claim') {
+          endpoint = `${API_URL}/forms/expense-claims/${form.id}/${roleEndpoint}`;
+        } else if (form.formType === 'eft') {
+          endpoint = `${API_URL}/forms/eft-requisitions/${form.id}/${roleEndpoint}`;
+        } else if (form.formType === 'petty_cash') {
+          endpoint = `${API_URL}/forms/petty-cash-requisitions/${form.id}/${roleEndpoint}`;
+        }
+
+        // Forms use 'action' and 'comment'
+        requestBody = {
+          action,
+          comment
+        };
+      }
+
+      const response = await fetchWithAuth(endpoint, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || `Failed to ${action} form`);
+      }
+
+      alert(`${form.displayType || 'Form'} ${action}ed successfully!`);
+
+      // Reload data
+      await loadData();
+
+    } catch (error) {
+      console.error(`Error ${action}ing form:`, error);
+      alert(`Error ${action}ing requisition. ${error.message}`);
+    }
+  };
+
+  // Admin reroute handler
+  const handleAdminReroute = (form) => {
+    setRerouteForm(form);
+    setShowAdminReroute(true);
+  };
+
+  const handleRerouteSubmit = async (action) => {
+    if (!rerouteForm) return;
+
+    try {
+      let endpoint = '';
+      let requestBody = {};
+
+      if (action === 'assign_to_user') {
+        // Assign to specific user - show user selection modal
+        if (!showUserSelection) {
+          // Fetch available users
+          try {
+            const users = await api.getRerouteUsers();
+            setAvailableUsers(users);
+            setShowUserSelection(true);
+            return; // Don't proceed yet, wait for user selection
+          } catch (error) {
+            alert('Failed to fetch users: ' + error.message);
+            return;
+          }
+        }
+
+        // User has selected someone
+        if (!selectedUserId) {
+          alert('Please select a user to assign to');
+          return;
+        }
+
+        if (!rerouteReason.trim()) {
+          alert('Please enter a reason for rerouting');
+          return;
+        }
+
+        // Determine the appropriate new status based on the selected user's role
+        const selectedUser = availableUsers.find(u => u.id === parseInt(selectedUserId));
+        if (!selectedUser) {
+          alert('Selected user not found');
+          return;
+        }
+
+        let newStatus = rerouteForm.status; // Keep current status by default
+        // Map user role to appropriate status
+        if (selectedUser.role === 'hod') {
+          newStatus = 'pending_hod';
+        } else if (selectedUser.role === 'procurement') {
+          newStatus = 'pending_procurement';
+        } else if (selectedUser.role === 'finance') {
+          newStatus = 'pending_finance';
+        } else if (selectedUser.role === 'md') {
+          newStatus = 'pending_md';
+        }
+
+        if (!confirm(`Assign to ${selectedUser.full_name} (${selectedUser.role}) and move to "${newStatus}"?`)) {
+          return;
+        }
+
+        // Use the generic reroute endpoint (works for all form types)
+        endpoint = `${API_URL}/admin/reroute/${rerouteForm.id}`;
+
+        requestBody = {
+          to_user_id: parseInt(selectedUserId),
+          reason: rerouteReason,
+          new_status: newStatus
+        };
+
+      } else if (action === 'skip_stage') {
+        // Skip current approval stage
+        const comment = prompt('Enter reason for skipping approval stage:');
+        if (!comment) {
+          alert('Reason is required');
+          return;
+        }
+
+        // Determine next status
+        let newStatus;
+        if (rerouteForm.status === 'pending_hod') {
+          newStatus = rerouteForm.formType === 'purchase_requisition' ? 'pending_procurement' : 'pending_finance';
+        } else if (rerouteForm.status === 'pending_procurement') {
+          newStatus = 'pending_finance';
+        } else if (rerouteForm.status === 'pending_finance') {
+          newStatus = 'pending_md';
+        } else if (rerouteForm.status === 'pending_md') {
+          newStatus = 'approved';
+        }
+
+        if (!newStatus) {
+          alert('Cannot skip this stage');
+          return;
+        }
+
+        if (!confirm(`Skip current stage and move to "${newStatus}"?`)) return;
+
+        // Use admin override endpoint
+        if (rerouteForm.formType === 'purchase_requisition') {
+          endpoint = `${API_URL}/requisitions/${rerouteForm.id}/admin-override`;
+        } else if (rerouteForm.formType === 'eft') {
+          endpoint = `${API_URL}/forms/eft-requisitions/${rerouteForm.id}/admin-override`;
+        } else if (rerouteForm.formType === 'petty_cash') {
+          endpoint = `${API_URL}/forms/petty-cash-requisitions/${rerouteForm.id}/admin-override`;
+        } else if (rerouteForm.formType === 'expense_claim') {
+          endpoint = `${API_URL}/forms/expense-claims/${rerouteForm.id}/admin-override`;
+        }
+
+        requestBody = {
+          action: 'skip_stage',
+          new_status: newStatus,
+          comment
+        };
+      } else if (action === 'reassign_hod') {
+        // Reassign to different department/HOD
+        const newDept = prompt('Enter new department name:');
+        if (!newDept) {
+          alert('Department name is required');
+          return;
+        }
+
+        if (!confirm(`Reassign to department "${newDept}"?`)) return;
+
+        if (rerouteForm.formType === 'purchase_requisition') {
+          endpoint = `${API_URL}/requisitions/${rerouteForm.id}/admin-override`;
+        } else if (rerouteForm.formType === 'eft') {
+          endpoint = `${API_URL}/forms/eft-requisitions/${rerouteForm.id}/admin-override`;
+        } else if (rerouteForm.formType === 'petty_cash') {
+          endpoint = `${API_URL}/forms/petty-cash-requisitions/${rerouteForm.id}/admin-override`;
+        } else if (rerouteForm.formType === 'expense_claim') {
+          endpoint = `${API_URL}/forms/expense-claims/${rerouteForm.id}/admin-override`;
+        }
+
+        requestBody = {
+          action: 'reassign_department',
+          new_department: newDept
+        };
+      }
+
+      // Use POST for assign_to_user (reroute endpoint), PUT for others (admin-override endpoints)
+      const httpMethod = action === 'assign_to_user' ? 'POST' : 'PUT';
+
+      const response = await fetchWithAuth(endpoint, {
+        method: httpMethod,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to reroute');
+      }
+
+      alert('Rerouted successfully!');
+      setShowAdminReroute(false);
+      setRerouteForm(null);
+      setShowUserSelection(false);
+      setSelectedUserId('');
+      setRerouteReason('');
+      setAvailableUsers([]);
+      await loadData();
+
+    } catch (error) {
+      console.error('Error rerouting:', error);
+      alert(`Error rerouting: ${error.message}`);
+    }
   };
 
   const downloadRequisitionPDF = async (reqId, reqNumber) => {
@@ -1816,6 +2558,90 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
       console.error('Error downloading requisition PDF:', error);
       alert(error.message || 'Failed to download requisition PDF. Please check your permissions.');
     }
+  };
+
+  const downloadFormPDF = async (form) => {
+    try {
+      let blob, filename;
+      switch (form.formType) {
+        case 'expense':
+          blob = await api.downloadExpenseClaimPDF(form.id);
+          filename = `ExpenseClaim_${form.id}.pdf`;
+          break;
+        case 'eft':
+          blob = await api.downloadEFTRequisitionPDF(form.id);
+          filename = `EFT_${form.id}.pdf`;
+          break;
+        case 'petty_cash':
+          blob = await api.downloadPettyCashPDF(form.id);
+          filename = `PettyCash_${form.id}.pdf`;
+          break;
+        default:
+          throw new Error('Unknown form type');
+      }
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error) {
+      console.error('Error downloading form PDF:', error);
+      alert(error.message || 'Failed to download form PDF.');
+    }
+  };
+
+  const previewFormPDF = async (form) => {
+    try {
+      let blob, title;
+      switch (form.formType) {
+        case 'expense':
+          blob = await api.downloadExpenseClaimPDF(form.id);
+          title = `Expense Claim - ${form.id}`;
+          break;
+        case 'eft':
+          blob = await api.downloadEFTRequisitionPDF(form.id);
+          title = `EFT Requisition - ${form.id}`;
+          break;
+        case 'petty_cash':
+          blob = await api.downloadPettyCashPDF(form.id);
+          title = `Petty Cash - ${form.id}`;
+          break;
+        default:
+          throw new Error('Unknown form type');
+      }
+      const url = window.URL.createObjectURL(blob);
+      setPreviewPdfUrl(url);
+      setPreviewPdfTitle(title);
+      setShowPdfPreview(true);
+    } catch (error) {
+      console.error('Error previewing form PDF:', error);
+      alert(error.message || 'Failed to preview form PDF.');
+    }
+  };
+
+  const previewRequisitionPDF = async (reqId, reqNumber) => {
+    try {
+      const blob = await api.downloadRequisitionPDF(reqId);
+      const url = window.URL.createObjectURL(blob);
+      setPreviewPdfUrl(url);
+      setPreviewPdfTitle(`Purchase Requisition - ${reqNumber}`);
+      setShowPdfPreview(true);
+    } catch (error) {
+      console.error('Error previewing requisition PDF:', error);
+      alert(error.message || 'Failed to preview requisition PDF.');
+    }
+  };
+
+  const closePdfPreview = () => {
+    if (previewPdfUrl) {
+      window.URL.revokeObjectURL(previewPdfUrl);
+    }
+    setShowPdfPreview(false);
+    setPreviewPdfUrl(null);
+    setPreviewPdfTitle('');
   };
 
   return React.createElement('div', { className: "space-y-6" },
@@ -1849,7 +2675,7 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
             React.createElement('p', {
               className: "text-2xl font-bold",
               style: { color: '#FFFFFF' }
-            }, requisitions.length)
+            }, allRequisitions.length)
           ),
           React.createElement('span', {
             className: "text-2xl",
@@ -1909,8 +2735,34 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
           }, '✓')
         )
       ),
-      // Total Value Card - Not clickable
+      // Rejected Card - Clickable
       React.createElement('div', {
+        onClick: () => setShowBreakdown('rejected'),
+        className: "rounded-lg shadow-sm border p-6 cursor-pointer hover:opacity-90 transition-opacity",
+        style: {
+          background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+          borderColor: 'transparent'
+        }
+      },
+        React.createElement('div', { className: "flex items-center justify-between" },
+          React.createElement('div', null,
+            React.createElement('p', {
+              className: "text-sm mb-1",
+              style: { color: 'rgba(255, 255, 255, 0.9)' }
+            }, "Rejected"),
+            React.createElement('p', {
+              className: "text-2xl font-bold",
+              style: { color: '#FFFFFF' }
+            }, rejectedRequisitions.length)
+          ),
+          React.createElement('span', {
+            className: "text-2xl",
+            style: { opacity: 0.9 }
+          }, '❌')
+        )
+      ),
+      // Total Value Card - Not clickable (Hidden for initiators)
+      !hasRole(user.role, 'initiator') && React.createElement('div', {
         className: "rounded-lg shadow-sm border p-6",
         style: {
           background: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
@@ -1938,6 +2790,154 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
       )
     ),
 
+    // Quick Actions - Forms Section
+    React.createElement('div', { className: "mt-6" },
+      React.createElement('h3', {
+        className: "text-xl font-bold mb-4",
+        style: { color: 'var(--text-primary)' }
+      }, "Quick Actions - Financial Forms"),
+      React.createElement('div', { className: "grid grid-cols-1 md:grid-cols-2 gap-4" },
+        // Expense Claim Form Card
+        React.createElement('a', {
+          href: 'expense-claim.html',
+          className: "block rounded-lg shadow-sm border p-4 hover:shadow-lg transition-all cursor-pointer",
+          style: {
+            backgroundColor: 'var(--bg-primary)',
+            borderColor: 'var(--border-color)',
+            textDecoration: 'none'
+          }
+        },
+          React.createElement('div', { className: "flex items-start gap-3" },
+            React.createElement('div', {
+              className: "text-3xl flex-shrink-0"
+            }, '📋'),
+            React.createElement('div', { className: "flex-1" },
+              React.createElement('h3', {
+                className: "text-base font-semibold mb-1",
+                style: { color: 'var(--color-primary)' }
+              }, "Expense Claim Form"),
+              React.createElement('p', {
+                className: "text-xs mb-2",
+                style: { color: 'var(--text-secondary)' }
+              }, "Submit travel and expense claims for reimbursement"),
+              React.createElement('span', {
+                className: "inline-block px-2 py-0.5 text-xs rounded-full",
+                style: {
+                  backgroundColor: 'var(--color-info-bg)',
+                  color: 'var(--color-info)'
+                }
+              }, "FM-FI-014")
+            )
+          )
+        ),
+
+        // EFT/Cheque Requisition Form Card
+        React.createElement('a', {
+          href: 'eft-requisition.html',
+          className: "block rounded-lg shadow-sm border p-4 hover:shadow-lg transition-all cursor-pointer",
+          style: {
+            backgroundColor: 'var(--bg-primary)',
+            borderColor: 'var(--border-color)',
+            textDecoration: 'none'
+          }
+        },
+          React.createElement('div', { className: "flex items-start gap-3" },
+            React.createElement('div', {
+              className: "text-3xl flex-shrink-0"
+            }, '💳'),
+            React.createElement('div', { className: "flex-1" },
+              React.createElement('h3', {
+                className: "text-base font-semibold mb-1",
+                style: { color: 'var(--color-primary)' }
+              }, "EFT/Cheque Requisition"),
+              React.createElement('p', {
+                className: "text-xs mb-2",
+                style: { color: 'var(--text-secondary)' }
+              }, "Request electronic payment or cheque issuance"),
+              React.createElement('span', {
+                className: "inline-block px-2 py-0.5 text-xs rounded-full",
+                style: {
+                  backgroundColor: 'var(--color-success-bg)',
+                  color: 'var(--color-success)'
+                }
+              }, "Electronic Transfer")
+            )
+          )
+        ),
+
+        // Petty Cash Requisition Form Card
+        React.createElement('a', {
+          href: 'petty-cash-requisition.html',
+          className: "block rounded-lg shadow-sm border p-4 hover:shadow-lg transition-all cursor-pointer",
+          style: {
+            backgroundColor: 'var(--bg-primary)',
+            borderColor: 'var(--border-color)',
+            textDecoration: 'none'
+          }
+        },
+          React.createElement('div', { className: "flex items-start gap-3" },
+            React.createElement('div', {
+              className: "text-3xl flex-shrink-0"
+            }, '💰'),
+            React.createElement('div', { className: "flex-1" },
+              React.createElement('h3', {
+                className: "text-base font-semibold mb-1",
+                style: { color: 'var(--color-primary)' }
+              }, "Petty Cash Requisition"),
+              React.createElement('p', {
+                className: "text-xs mb-2",
+                style: { color: 'var(--text-secondary)' }
+              }, "Request petty cash for minor expenses"),
+              React.createElement('span', {
+                className: "inline-block px-2 py-0.5 text-xs rounded-full",
+                style: {
+                  backgroundColor: 'var(--color-warning-bg)',
+                  color: 'var(--color-warning)'
+                }
+              }, "Cash Payment")
+            )
+          )
+        ),
+
+        // Purchase Requisition Card (existing functionality)
+        hasRole(user.role, 'initiator', 'procurement') && React.createElement('a', {
+          onClick: (e) => {
+            e.preventDefault();
+            setView('create');
+          },
+          className: "block rounded-lg shadow-sm border p-4 hover:shadow-lg transition-all cursor-pointer",
+          style: {
+            backgroundColor: 'var(--bg-primary)',
+            borderColor: 'var(--border-color)',
+            textDecoration: 'none'
+          }
+        },
+          React.createElement('div', { className: "flex items-start gap-3" },
+            React.createElement('div', {
+              className: "text-3xl flex-shrink-0"
+            }, '🛒'),
+            React.createElement('div', { className: "flex-1" },
+              React.createElement('h3', {
+                className: "text-base font-semibold mb-1",
+                style: { color: 'var(--color-primary)' }
+              }, "Purchase Requisition"),
+              React.createElement('p', {
+                className: "text-xs mb-2",
+                style: { color: 'var(--text-secondary)' }
+              }, "Create new purchase requisition for goods/services"),
+              React.createElement('span', {
+                className: "inline-block px-2 py-0.5 text-xs rounded-full",
+                style: {
+                  backgroundColor: 'var(--color-warning-bg)',
+                  color: 'var(--color-warning)'
+                }
+              }, "Procurement")
+            )
+          )
+        )
+      )
+    ),
+
     // Breakdown Modal
     showBreakdown && React.createElement('div', {
       className: "fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4",
@@ -1960,8 +2960,9 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
             className: "text-2xl font-bold transition-colors",
             style: { color: 'var(--text-primary)' }
           },
-            showBreakdown === 'total' ? `All Requisitions (${requisitions.length})` :
+            showBreakdown === 'total' ? `All Requisitions (${allRequisitions.length})` :
             showBreakdown === 'pending' ? `Pending Approvals (${pendingApprovals})` :
+            showBreakdown === 'rejected' ? `Rejected Requisitions (${rejectedRequisitions.length})` :
             `Approved Requisitions (${approvedRequisitions.length})`
           ),
           React.createElement('button', {
@@ -1971,46 +2972,253 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
           }, '×')
         ),
 
-        // Modal Content - Requisitions List
+        // Summary Section for Approved Forms (show breakdown by type)
+        showBreakdown === 'approved' && React.createElement('div', {
+          className: "mb-6 p-4 rounded-lg",
+          style: {
+            backgroundColor: 'var(--bg-secondary)',
+            borderWidth: '1px',
+            borderColor: 'var(--border-color)'
+          }
+        },
+          React.createElement('h3', {
+            className: "text-sm font-bold mb-3 transition-colors",
+            style: { color: 'var(--text-primary)' }
+          }, "Breakdown by Form Type:"),
+          React.createElement('div', { className: "grid grid-cols-2 gap-3" },
+            React.createElement('div', {
+              className: "flex items-center justify-between p-2 rounded",
+              style: { backgroundColor: 'var(--bg-primary)' }
+            },
+              React.createElement('span', {
+                className: "text-sm transition-colors",
+                style: { color: 'var(--text-secondary)' }
+              }, "Purchase Requisitions:"),
+              React.createElement('span', {
+                className: "text-sm font-bold transition-colors",
+                style: { color: 'var(--color-primary)' }
+              }, approvedPurchaseRequisitions.length)
+            ),
+            React.createElement('div', {
+              className: "flex items-center justify-between p-2 rounded",
+              style: { backgroundColor: 'var(--bg-primary)' }
+            },
+              React.createElement('span', {
+                className: "text-sm transition-colors",
+                style: { color: 'var(--text-secondary)' }
+              }, "EFT Requisitions:"),
+              React.createElement('span', {
+                className: "text-sm font-bold",
+                style: { color: '#1E40AF' }
+              }, approvedForms.filter(f => f.formType === 'eft').length)
+            ),
+            React.createElement('div', {
+              className: "flex items-center justify-between p-2 rounded",
+              style: { backgroundColor: 'var(--bg-primary)' }
+            },
+              React.createElement('span', {
+                className: "text-sm transition-colors",
+                style: { color: 'var(--text-secondary)' }
+              }, "Petty Cash:"),
+              React.createElement('span', {
+                className: "text-sm font-bold",
+                style: { color: '#059669' }
+              }, approvedForms.filter(f => f.formType === 'petty_cash').length)
+            ),
+            React.createElement('div', {
+              className: "flex items-center justify-between p-2 rounded",
+              style: { backgroundColor: 'var(--bg-primary)' }
+            },
+              React.createElement('span', {
+                className: "text-sm transition-colors",
+                style: { color: 'var(--text-secondary)' }
+              }, "Expense Claims:"),
+              React.createElement('span', {
+                className: "text-sm font-bold",
+                style: { color: '#D97706' }
+              }, approvedForms.filter(f => f.formType === 'expense').length)
+            )
+          ),
+          React.createElement('div', {
+            className: "mt-3 pt-3 flex items-center justify-between",
+            style: { borderTop: '1px solid var(--border-color)' }
+          },
+            React.createElement('span', {
+              className: "text-sm font-bold transition-colors",
+              style: { color: 'var(--text-primary)' }
+            }, "Total:"),
+            React.createElement('span', {
+              className: "text-lg font-bold transition-colors",
+              style: { color: 'var(--color-primary)' }
+            }, approvedRequisitions.length)
+          )
+        ),
+
+        // Modal Content - Requisitions and Forms List
         React.createElement('div', { className: "space-y-3" },
-          (showBreakdown === 'total' ? requisitions :
+          (showBreakdown === 'total' ? allRequisitions :
            showBreakdown === 'pending' ? pendingRequisitions :
+           showBreakdown === 'rejected' ? rejectedRequisitions :
            approvedRequisitions).map(req =>
             React.createElement('div', {
-              key: req.id,
-              className: "rounded-lg p-4 cursor-pointer hover:opacity-90 transition-all",
+              key: `${req.formType || 'req'}-${req.id}`,
+              className: "rounded-lg p-4 transition-all",
               style: {
                 backgroundColor: 'var(--bg-secondary)',
                 borderWidth: '1px',
                 borderColor: 'var(--border-color)'
-              },
-              onClick: () => {
-                setShowBreakdown(null);
-                handleViewReq(req);
               }
             },
               React.createElement('div', { className: "flex items-center justify-between mb-2" },
-                React.createElement('h3', {
-                  className: "font-bold transition-colors",
-                  style: { color: 'var(--color-primary)' }
-                }, req.req_number),
-                React.createElement('span', {
-                  className: `px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(req.status)}`
-                }, getStatusText(req.status))
+                React.createElement('div', { className: "flex items-center gap-2" },
+                  // Show form type badge for forms
+                  req.formType && React.createElement('span', {
+                    className: "px-2 py-1 text-xs font-semibold rounded",
+                    style: {
+                      backgroundColor: req.formType === 'expense' ? '#FEF3C7' :
+                                      req.formType === 'eft' ? '#DBEAFE' : '#D1FAE5',
+                      color: req.formType === 'expense' ? '#D97706' :
+                             req.formType === 'eft' ? '#1E40AF' : '#059669'
+                    }
+                  }, req.displayType),
+                  React.createElement('h3', {
+                    className: "font-bold transition-colors",
+                    style: { color: 'var(--color-primary)' }
+                  }, req.req_number || req.id)
+                ),
+                React.createElement('div', { className: "flex items-center gap-2" },
+                  // Show preview and download buttons for approved items (any approval status) - Available to ALL roles
+                  isApproved(req.status) &&
+                  React.createElement(React.Fragment, null,
+                    // Preview Button
+                    React.createElement('button', {
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        if (req.formType) {
+                          previewFormPDF(req);
+                        } else {
+                          previewRequisitionPDF(req.id, req.req_number);
+                        }
+                      },
+                      className: "px-2 py-1 text-xs font-medium rounded hover:opacity-80 transition-all flex items-center gap-1",
+                      style: {
+                        backgroundColor: '#3B82F6',
+                        color: '#FFFFFF'
+                      },
+                      title: `Preview ${req.displayType || 'Requisition'} PDF`
+                    },
+                      React.createElement('svg', { className: "w-3 h-3", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" },
+                        React.createElement('path', { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M15 12a3 3 0 11-6 0 3 3 0 016 0z" }),
+                        React.createElement('path', { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" })
+                      ),
+                      'Preview'
+                    ),
+                    // Download Button
+                    React.createElement('button', {
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        if (req.formType) {
+                          downloadFormPDF(req);
+                        } else {
+                          downloadRequisitionPDF(req.id, req.req_number);
+                        }
+                      },
+                      className: "px-2 py-1 text-xs font-medium rounded hover:opacity-80 transition-all flex items-center gap-1",
+                      style: {
+                        backgroundColor: 'var(--color-success)',
+                        color: '#FFFFFF'
+                      },
+                      title: `Download ${req.displayType || 'Requisition'} PDF`
+                    },
+                      React.createElement('svg', { className: "w-3 h-3", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" },
+                        React.createElement('path', { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" })
+                      ),
+                      'Download'
+                    )
+                  ),
+                  React.createElement('span', {
+                    className: `px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(req.status)}`
+                  }, getStatusText(req.status))
+                )
+              ),
+              // Quick Approval Buttons for HOD, Finance, and MD (NOT Procurement)
+              showBreakdown === 'pending' && (
+                (user.role === 'hod' && req.status === 'pending_hod') ||
+                (user.role === 'finance' && (req.status === 'pending_finance' || req.status === 'hod_approved')) ||
+                (user.role === 'md' && (req.status === 'pending_md' || req.status === 'finance_approved'))
+              ) &&
+              React.createElement('div', { className: "flex items-center gap-2 mt-3" },
+                React.createElement('button', {
+                  onClick: async (e) => {
+                    e.stopPropagation();
+                    await handleQuickAction(req, 'approve');
+                  },
+                  className: "flex-1 px-3 py-1.5 text-xs font-medium rounded hover:opacity-90 transition-all",
+                  style: {
+                    backgroundColor: 'var(--color-success)',
+                    color: '#FFFFFF'
+                  }
+                }, 'Approve'),
+                React.createElement('button', {
+                  onClick: async (e) => {
+                    e.stopPropagation();
+                    await handleQuickAction(req, 'reject');
+                  },
+                  className: "flex-1 px-3 py-1.5 text-xs font-medium rounded hover:opacity-90 transition-all",
+                  style: {
+                    backgroundColor: '#EF4444',
+                    color: '#FFFFFF'
+                  }
+                }, 'Reject')
+              ),
+              // Adjudicate Button for Procurement (only for Purchase Requisitions)
+              showBreakdown === 'pending' &&
+              user.role === 'procurement' &&
+              req.status === 'pending_procurement' &&
+              req.formType === 'purchase_requisition' &&
+              React.createElement('div', { className: "mt-3" },
+                React.createElement('button', {
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    setView('quotes-adjudication');
+                  },
+                  className: "w-full px-3 py-1.5 text-xs font-medium rounded hover:opacity-90 transition-all",
+                  style: {
+                    backgroundColor: '#8B5CF6',
+                    color: '#FFFFFF'
+                  }
+                }, '⚖️ Adjudicate')
+              ),
+              // Admin Reroute Button (ONLY for purchase requisitions, not forms)
+              showBreakdown === 'pending' &&
+              user.role === 'admin' &&
+              (!req.formType || req.formType === 'purchase_requisition') &&
+              React.createElement('div', { className: "mt-3" },
+                React.createElement('button', {
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    handleAdminReroute(req);
+                  },
+                  className: "w-full px-3 py-1.5 text-xs font-medium rounded hover:opacity-90 transition-all",
+                  style: {
+                    backgroundColor: '#F59E0B',
+                    color: '#FFFFFF'
+                  }
+                }, '🔀 Admin Reroute')
               ),
               React.createElement('p', {
                 className: "text-sm mb-2 transition-colors",
                 style: { color: 'var(--text-secondary)' }
-              }, req.description || req.title),
+              }, req.description || req.title || req.purpose || req.employee_name || 'No description'),
               React.createElement('div', { className: "flex items-center justify-between text-sm" },
                 React.createElement('span', {
                   className: "transition-colors",
                   style: { color: 'var(--text-tertiary)' }
-                }, `${req.department} • Created: ${new Date(req.created_at).toLocaleDateString()}`),
+                }, `${req.department || 'N/A'} • Created: ${new Date(req.created_at).toLocaleDateString()}`),
                 React.createElement('span', {
                   className: "font-bold transition-colors",
                   style: { color: 'var(--text-primary)' }
-                }, `ZMW ${(req.amount || req.total_amount || 0).toLocaleString()}`)
+                }, `ZMW ${(req.amount || req.total_amount || req.total_claim || 0).toLocaleString()}`)
               )
             )
           )
@@ -2020,7 +3228,7 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
     React.createElement('div', { className: "bg-white rounded-lg shadow-sm border" },
       React.createElement('div', { className: "px-6 py-4 border-b" },
         React.createElement('h2', { className: "text-xl font-semibold text-gray-800" },
-          user.role === 'initiator' ? 'My Requisitions' : 'Requisitions for Review'
+          hasRole(user.role, 'initiator') ? 'My Requisitions' : 'Requisitions for Review'
         )
       ),
       React.createElement('div', { className: "overflow-x-auto" },
@@ -2056,12 +3264,13 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
                         React.createElement('button', {
                           onClick: () => handleViewReq(req),
                           className: "text-blue-600 hover:text-blue-800 text-sm font-medium"
-                        }, user.role === 'initiator' ? 'View' : 'Review'),
-                        // Show PDF download button for approved requisitions
-                        (req.status !== 'pending' && req.status !== 'rejected') && React.createElement('button', {
+                        }, hasRole(user.role, 'initiator') ? 'View' : 'Review'),
+                        // Show PDF download button for approved/completed requisitions only - Available to ALL roles
+                        (req.status === 'approved' || req.status === 'completed') &&
+                        React.createElement('button', {
                           onClick: () => downloadRequisitionPDF(req.id, req.req_number),
                           className: "text-green-600 hover:text-green-800 text-sm font-medium flex items-center gap-1",
-                          title: "Download Requisition PDF"
+                          title: "Download Approved Requisition PDF"
                         },
                           React.createElement('svg', { className: "w-4 h-4", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" },
                             React.createElement('path', { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" })
@@ -2075,20 +3284,224 @@ function Dashboard({ user, data, setView, setSelectedReq }) {
           )
         )
       )
+    ),
+
+    // PDF Preview Modal
+    showPdfPreview && React.createElement('div', {
+      className: "fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4",
+      onClick: closePdfPreview
+    },
+      React.createElement('div', {
+        className: "rounded-lg p-6 w-full h-full max-w-6xl max-h-[90vh] flex flex-col",
+        style: {
+          backgroundColor: 'var(--bg-primary)',
+          boxShadow: 'var(--shadow-lg)'
+        },
+        onClick: (e) => e.stopPropagation()
+      },
+        // Modal Header
+        React.createElement('div', {
+          className: "flex items-center justify-between mb-4 pb-4",
+          style: { borderBottom: '1px solid var(--border-color)' }
+        },
+          React.createElement('h2', {
+            className: "text-2xl font-bold transition-colors",
+            style: { color: 'var(--text-primary)' }
+          }, previewPdfTitle),
+          React.createElement('button', {
+            onClick: closePdfPreview,
+            className: "text-2xl font-bold hover:opacity-70 transition-colors",
+            style: { color: 'var(--text-secondary)' }
+          }, '×')
+        ),
+        // PDF iframe
+        React.createElement('div', {
+          className: "flex-1 overflow-hidden"
+        },
+          React.createElement('iframe', {
+            src: previewPdfUrl,
+            className: "w-full h-full border-0"
+          })
+        )
+      )
+    ),
+
+    // Admin Reroute Modal
+    showAdminReroute && rerouteForm && React.createElement('div', {
+      className: "fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4",
+      onClick: () => setShowAdminReroute(false)
+    },
+      React.createElement('div', {
+        className: "rounded-lg p-6 w-full max-w-md",
+        style: {
+          backgroundColor: 'var(--bg-primary)',
+          boxShadow: 'var(--shadow-lg)'
+        },
+        onClick: (e) => e.stopPropagation()
+      },
+        // Modal Header
+        React.createElement('div', {
+          className: "flex items-center justify-between mb-4 pb-4",
+          style: { borderBottom: '1px solid var(--border-color)' }
+        },
+          React.createElement('h2', {
+            className: "text-xl font-bold transition-colors",
+            style: { color: 'var(--text-primary)' }
+          }, '🔀 Admin Reroute'),
+          React.createElement('button', {
+            onClick: () => setShowAdminReroute(false),
+            className: "text-2xl font-bold hover:opacity-70 transition-colors",
+            style: { color: 'var(--text-secondary)' }
+          }, '×')
+        ),
+        // Modal Body
+        React.createElement('div', { className: "space-y-4" },
+          React.createElement('div', {
+            className: "p-3 rounded",
+            style: { backgroundColor: 'var(--bg-secondary)' }
+          },
+            React.createElement('p', {
+              className: "text-sm font-medium",
+              style: { color: 'var(--text-secondary)' }
+            }, `${rerouteForm.displayType}: ${rerouteForm.id}`),
+            React.createElement('p', {
+              className: "text-sm",
+              style: { color: 'var(--text-tertiary)' }
+            }, `Current Status: ${rerouteForm.status}`)
+          ),
+          React.createElement('h3', {
+            className: "font-semibold",
+            style: { color: 'var(--text-primary)' }
+          }, 'Reroute Options:'),
+          React.createElement('button', {
+            onClick: () => handleRerouteSubmit('skip_stage'),
+            className: "w-full px-4 py-3 rounded text-left hover:opacity-90 transition-all",
+            style: {
+              backgroundColor: '#F59E0B',
+              color: '#FFFFFF'
+            }
+          },
+            React.createElement('div', { className: "font-semibold" }, '⏭️ Skip Current Approval Stage'),
+            React.createElement('div', { className: "text-sm opacity-90" }, 'Move to next approval stage')
+          ),
+          React.createElement('button', {
+            onClick: () => handleRerouteSubmit('reassign_hod'),
+            className: "w-full px-4 py-3 rounded text-left hover:opacity-90 transition-all",
+            style: {
+              backgroundColor: '#8B5CF6',
+              color: '#FFFFFF'
+            }
+          },
+            React.createElement('div', { className: "font-semibold" }, '🔄 Reassign to Different HOD'),
+            React.createElement('div', { className: "text-sm opacity-90" }, 'Change department/HOD')
+          ),
+          React.createElement('button', {
+            onClick: () => handleRerouteSubmit('assign_to_user'),
+            className: "w-full px-4 py-3 rounded text-left hover:opacity-90 transition-all",
+            style: {
+              backgroundColor: '#10B981',
+              color: '#FFFFFF'
+            }
+          },
+            React.createElement('div', { className: "font-semibold" }, '👤 Assign to Specific User'),
+            React.createElement('div', { className: "text-sm opacity-90" }, 'Choose a user to assign this form to')
+          ),
+          // User Selection Interface (shown when assign_to_user is clicked)
+          showUserSelection && React.createElement('div', {
+            className: "p-4 rounded border-2",
+            style: {
+              borderColor: '#10B981',
+              backgroundColor: 'var(--bg-secondary)'
+            }
+          },
+            React.createElement('h4', {
+              className: "font-semibold mb-3",
+              style: { color: 'var(--text-primary)' }
+            }, 'Select User and Enter Reason:'),
+            React.createElement('select', {
+              value: selectedUserId,
+              onChange: (e) => setSelectedUserId(e.target.value),
+              className: "w-full p-2 mb-3 rounded border",
+              style: {
+                backgroundColor: 'var(--bg-primary)',
+                borderColor: 'var(--border-color)',
+                color: 'var(--text-primary)'
+              }
+            },
+              React.createElement('option', { value: '' }, '-- Select User --'),
+              availableUsers.map(u =>
+                React.createElement('option', { key: u.id, value: u.id },
+                  `${u.full_name} (${u.role} - ${u.department})`
+                )
+              )
+            ),
+            React.createElement('textarea', {
+              value: rerouteReason,
+              onChange: (e) => setRerouteReason(e.target.value),
+              placeholder: 'Enter reason for rerouting...',
+              className: "w-full p-2 mb-3 rounded border",
+              rows: 3,
+              style: {
+                backgroundColor: 'var(--bg-primary)',
+                borderColor: 'var(--border-color)',
+                color: 'var(--text-primary)'
+              }
+            }),
+            React.createElement('div', { className: "flex gap-2" },
+              React.createElement('button', {
+                onClick: () => handleRerouteSubmit('assign_to_user'),
+                className: "flex-1 px-4 py-2 rounded font-semibold hover:opacity-90 transition-all",
+                style: {
+                  backgroundColor: '#10B981',
+                  color: '#FFFFFF'
+                }
+              }, 'Submit Assignment'),
+              React.createElement('button', {
+                onClick: () => {
+                  setShowUserSelection(false);
+                  setSelectedUserId('');
+                  setRerouteReason('');
+                },
+                className: "flex-1 px-4 py-2 rounded hover:opacity-90 transition-all",
+                style: {
+                  backgroundColor: 'var(--bg-secondary)',
+                  color: 'var(--text-primary)'
+                }
+              }, 'Back')
+            )
+          ),
+          React.createElement('button', {
+            onClick: () => {
+              setShowAdminReroute(false);
+              setShowUserSelection(false);
+              setSelectedUserId('');
+              setRerouteReason('');
+              setAvailableUsers([]);
+            },
+            className: "w-full px-4 py-2 rounded hover:opacity-90 transition-all",
+            style: {
+              backgroundColor: 'var(--bg-secondary)',
+              color: 'var(--text-primary)'
+            }
+          }, 'Cancel')
+        )
+      )
     )
   );
 }
 
 function CreateRequisition({ user, setView, loadData }) {
   const [formData, setFormData] = useState({
-    description: '',
-    quantity: 1,
     dateRequired: '',
     justification: '',
     department: user.department,
     urgency: 'standard',
-    selectedHod: '' // For procurement to select HOD
+    selectedHod: '', // For procurement to select HOD
+    taxType: user.role === 'procurement' ? 'VAT' : null // Only for procurement
   });
+  const [lineItems, setLineItems] = useState([
+    { item_name: '', quantity: 1, unit_price: '' }
+  ]);
   const [loading, setLoading] = useState(false);
   const [hodUsers, setHodUsers] = useState([]);
 
@@ -2112,10 +3525,13 @@ function CreateRequisition({ user, setView, loadData }) {
       const fetchHodUsers = async () => {
         try {
           const users = await api.getUsers();
-          const hods = users.filter(u => u.role === 'hod');
+          // Filter users with role 'hod' and ensure they have proper data
+          const hods = Array.isArray(users) ? users.filter(u => u.role === 'hod' && u.id) : [];
+          console.log('Fetched HOD users:', hods); // Debug log
           setHodUsers(hods);
         } catch (error) {
           console.error('Error loading HOD users:', error);
+          setHodUsers([]); // Set empty array on error
         }
       };
       fetchHodUsers();
@@ -2133,26 +3549,80 @@ function CreateRequisition({ user, setView, loadData }) {
     return today.toISOString().split('T')[0];
   };
 
+  const addLineItem = () => {
+    if (lineItems.length >= 15) {
+      alert('Maximum of 15 line items allowed');
+      return;
+    }
+    setLineItems([...lineItems, { item_name: '', quantity: 1, unit_price: '' }]);
+  };
+
+  // Calculate totals for display
+  const calculateTotals = () => {
+    const subtotal = lineItems.reduce((sum, item) => {
+      const qty = parseFloat(item.quantity) || 0;
+      const price = parseFloat(item.unit_price) || 0;
+      return sum + (qty * price);
+    }, 0);
+    // TOT = no tax calculated, VAT = 16% tax, null = initiator (no tax selection yet)
+    const tax = formData.taxType === 'VAT' ? subtotal * 0.16 : 0;
+    const grandTotal = subtotal + tax;
+    return { subtotal, tax, grandTotal, taxType: formData.taxType };
+  };
+
+  const removeLineItem = (index) => {
+    if (lineItems.length === 1) {
+      alert('At least one line item is required');
+      return;
+    }
+    const newItems = lineItems.filter((_, i) => i !== index);
+    setLineItems(newItems);
+  };
+
+  const updateLineItem = (index, field, value) => {
+    const newItems = [...lineItems];
+    newItems[index][field] = value;
+    setLineItems(newItems);
+  };
+
   const handleSaveAsDraft = async () => {
-    if (!formData.description || !formData.quantity || !formData.dateRequired || !formData.justification) {
-      alert('Please fill in all required fields');
+    // Validate at least one item has description
+    const validItems = lineItems.filter(item => item.item_name.trim() !== '');
+    if (validItems.length === 0) {
+      alert('Please add at least one item with a description');
+      return;
+    }
+
+    if (!formData.dateRequired) {
+      alert('Please select a required date');
       return;
     }
 
     setLoading(true);
     try {
+      // Add justification and calculate total_price for each item
+      const itemsWithSpecs = validItems.map(item => {
+        const qty = parseFloat(item.quantity) || 0;
+        const price = parseFloat(item.unit_price) || 0;
+        return {
+          item_name: item.item_name,
+          quantity: qty,
+          unit_price: price,
+          total_price: qty * price,
+          specifications: formData.justification || 'Draft - No justification provided yet',
+          currency: 'ZMW'
+        };
+      });
+
       const reqData = {
-        description: formData.description,
+        description: validItems[0].item_name, // Primary description from first item
         delivery_location: 'Office',
         urgency: formData.urgency,
         required_date: formData.dateRequired,
         account_code: null,
         initiatorId: user.id,
-        items: [{
-          item_name: formData.description,
-          quantity: formData.quantity,
-          specifications: formData.justification
-        }]
+        items: itemsWithSpecs,
+        tax_type: formData.taxType // Include tax type
       };
 
       const response = await api.createRequisition(reqData);
@@ -2168,9 +3638,30 @@ function CreateRequisition({ user, setView, loadData }) {
   };
 
   const handleSubmitForApproval = async () => {
-    if (!formData.description || !formData.quantity || !formData.dateRequired || !formData.justification) {
-      alert('Please fill in all required fields');
+    // Validate at least one item has description
+    const validItems = lineItems.filter(item => item.item_name.trim() !== '');
+    if (validItems.length === 0) {
+      alert('Please add at least one item with a description');
       return;
+    }
+
+    if (!formData.dateRequired) {
+      alert('Please select a required date');
+      return;
+    }
+
+    if (!formData.justification || formData.justification.trim() === '') {
+      alert('Please provide a justification for this requisition');
+      return;
+    }
+
+    // Validate that items with pricing have unit prices (only for procurement)
+    if (user.role === 'procurement') {
+      const itemsWithPrices = validItems.filter(item => item.unit_price && parseFloat(item.unit_price) > 0);
+      if (itemsWithPrices.length === 0) {
+        alert('Please provide unit price for at least one item');
+        return;
+      }
     }
 
     // If procurement is creating, they must select an HOD
@@ -2181,19 +3672,30 @@ function CreateRequisition({ user, setView, loadData }) {
 
     setLoading(true);
     try {
+      // Add justification and calculate total_price for each item
+      const itemsWithSpecs = validItems.map(item => {
+        const qty = parseFloat(item.quantity) || 0;
+        const price = parseFloat(item.unit_price) || 0;
+        return {
+          item_name: item.item_name,
+          quantity: qty,
+          unit_price: price,
+          total_price: qty * price,
+          specifications: formData.justification,
+          currency: 'ZMW'
+        };
+      });
+
       // First create as draft
       const reqData = {
-        description: formData.description,
+        description: validItems[0].item_name, // Primary description from first item
         delivery_location: 'Office',
         urgency: formData.urgency,
         required_date: formData.dateRequired,
         account_code: null,
         initiatorId: user.id,
-        items: [{
-          item_name: formData.description,
-          quantity: formData.quantity,
-          specifications: formData.justification
-        }]
+        items: itemsWithSpecs,
+        tax_type: formData.taxType // Include tax type
       };
 
       const response = await api.createRequisition(reqData);
@@ -2202,7 +3704,7 @@ function CreateRequisition({ user, setView, loadData }) {
       if (response.requisition_id) {
         await api.submitRequisition(response.requisition_id, user.id, formData.selectedHod);
       }
-      
+
       await loadData();
       alert('Requisition submitted for approval successfully!');
       setView('dashboard');
@@ -2244,28 +3746,135 @@ function CreateRequisition({ user, setView, loadData }) {
       ),
 
       React.createElement('div', { className: "space-y-6" },
-        React.createElement('div', null,
-          React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Item Description *"),
-          React.createElement('input', {
-            type: "text",
-            value: formData.description,
-            onChange: (e) => setFormData({...formData, description: e.target.value}),
-            className: "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500",
-            placeholder: "e.g., Office Supplies, Laptops, Furniture"
-          })
-        ),
-        React.createElement('div', { className: "grid grid-cols-2 gap-4" },
-          React.createElement('div', null,
-            React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Quantity *"),
-            React.createElement('input', {
-              type: "number",
-              min: "1",
-              value: formData.quantity,
-              onChange: (e) => setFormData({...formData, quantity: parseInt(e.target.value) || 1}),
-              className: "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500",
-              placeholder: "Enter quantity"
-            })
+        // Line Items Section
+        React.createElement('div', { className: "border-2 border-dashed border-gray-300 rounded-lg p-6 bg-gray-50" },
+          React.createElement('div', { className: "flex items-center justify-between mb-4" },
+            React.createElement('h3', { className: "text-lg font-semibold text-gray-800" },
+              `Line Items (${lineItems.length}/15)`
+            ),
+            React.createElement('button', {
+              onClick: addLineItem,
+              disabled: lineItems.length >= 15,
+              className: "px-4 py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+            },
+              React.createElement('span', null, '➕'),
+              'Add Item'
+            )
           ),
+          React.createElement('div', { className: "space-y-4" },
+            lineItems.map((item, index) =>
+              React.createElement('div', {
+                key: index,
+                className: "bg-white border border-gray-300 rounded-lg p-4 relative"
+              },
+                React.createElement('div', { className: "flex items-center justify-between mb-3" },
+                  React.createElement('span', { className: "text-sm font-semibold text-gray-700" },
+                    `Item ${index + 1}`
+                  ),
+                  lineItems.length > 1 && React.createElement('button', {
+                    onClick: () => removeLineItem(index),
+                    className: "text-red-600 hover:text-red-800 font-medium text-sm flex items-center gap-1"
+                  },
+                    React.createElement('span', null, '🗑️'),
+                    'Remove'
+                  )
+                ),
+                React.createElement('div', { className: "grid grid-cols-3 gap-3" },
+                  React.createElement('div', null,
+                    React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-1" },
+                      "Item Description *"
+                    ),
+                    React.createElement('input', {
+                      type: "text",
+                      value: item.item_name,
+                      onChange: (e) => updateLineItem(index, 'item_name', e.target.value),
+                      className: "w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500",
+                      placeholder: "e.g., Office Supplies"
+                    })
+                  ),
+                  React.createElement('div', null,
+                    React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-1" },
+                      "Quantity *"
+                    ),
+                    React.createElement('input', {
+                      type: "number",
+                      min: "1",
+                      value: item.quantity,
+                      onChange: (e) => updateLineItem(index, 'quantity', parseInt(e.target.value) || 1),
+                      className: "w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500",
+                      placeholder: "Qty"
+                    })
+                  ),
+                  React.createElement('div', null,
+                    React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-1" },
+                      hasRole(user.role, 'initiator') ? "Unit Price (ZMW)" : "Unit Price (ZMW) *"
+                    ),
+                    React.createElement('input', {
+                      type: "number",
+                      min: "0",
+                      step: "0.01",
+                      value: item.unit_price,
+                      onChange: (e) => updateLineItem(index, 'unit_price', e.target.value),
+                      disabled: hasRole(user.role, 'initiator'),
+                      className: `w-full px-3 py-2 border rounded-lg ${hasRole(user.role, 'initiator') ? 'bg-gray-100 text-gray-500 cursor-not-allowed border-gray-200' : 'border-gray-300 focus:ring-2 focus:ring-blue-500'}`,
+                      placeholder: hasRole(user.role, 'initiator') ? 'To be filled by Procurement' : '0.00',
+                      title: hasRole(user.role, 'initiator') ? 'Unit price will be filled by Procurement' : 'Enter unit price'
+                    })
+                  )
+                ),
+                // Display item total
+                (item.quantity && item.unit_price) && React.createElement('div', { className: "mt-2 text-right" },
+                  React.createElement('span', { className: "text-sm font-semibold text-gray-700" },
+                    `Item Total: ZMW ${((parseFloat(item.quantity) || 0) * (parseFloat(item.unit_price) || 0)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  )
+                )
+              )
+            )
+          ),
+          // Totals Summary (only show for procurement or if there are prices)
+          (user.role === 'procurement' || calculateTotals().subtotal > 0) && React.createElement('div', { className: "mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg" },
+            React.createElement('h4', { className: "text-sm font-semibold text-blue-900 mb-3" }, "💰 Requisition Totals"),
+            hasRole(user.role, 'initiator') && calculateTotals().subtotal === 0 ?
+              React.createElement('p', { className: "text-sm text-gray-600 italic" },
+                "Unit prices will be filled by Procurement"
+              ) :
+              React.createElement('div', { className: "space-y-2" },
+                React.createElement('div', { className: "flex justify-between text-sm" },
+                  React.createElement('span', { className: "text-gray-700" }, "Subtotal:"),
+                  React.createElement('span', { className: "font-semibold text-gray-900" },
+                    `ZMW ${calculateTotals().subtotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  )
+                ),
+                // Only show tax line for procurement users
+                user.role === 'procurement' && formData.taxType === 'VAT' && React.createElement('div', { className: "flex justify-between text-sm" },
+                  React.createElement('span', { className: "text-gray-700" }, "VAT (16%):"),
+                  React.createElement('span', { className: "font-semibold text-gray-900" },
+                    `ZMW ${calculateTotals().tax.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  )
+                ),
+                // Show TOT notice if TOT is selected (procurement only)
+                user.role === 'procurement' && formData.taxType === 'TOT' && React.createElement('div', { className: "flex justify-between text-sm" },
+                  React.createElement('span', { className: "text-gray-700 italic" }, "Tax:"),
+                  React.createElement('span', { className: "font-semibold text-gray-600 italic" }, "TOT - No Tax Applied")
+                ),
+                // Show note for initiators that tax will be determined by procurement
+                hasRole(user.role, 'initiator') && calculateTotals().subtotal > 0 && React.createElement('div', { className: "flex justify-between text-sm" },
+                  React.createElement('span', { className: "text-gray-700 italic" }, "Tax:"),
+                  React.createElement('span', { className: "font-semibold text-gray-600 italic text-xs" }, "Will be determined by Procurement")
+                ),
+                React.createElement('div', { className: "flex justify-between text-base pt-2 border-t border-blue-300" },
+                  React.createElement('span', { className: "font-bold text-blue-900" },
+                    hasRole(user.role, 'initiator') ? "Subtotal:" : "Grand Total:"
+                  ),
+                  React.createElement('span', { className: "font-bold text-blue-900 text-lg" },
+                    `ZMW ${calculateTotals().grandTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  )
+                )
+              )
+          )
+        ),
+        // General Requisition Details
+        React.createElement('div', { className: "grid grid-cols-2 gap-4" },
           React.createElement('div', null,
             React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Date Required *"),
             React.createElement('input', {
@@ -2275,34 +3884,61 @@ function CreateRequisition({ user, setView, loadData }) {
               onChange: (e) => setFormData({...formData, dateRequired: e.target.value}),
               className: "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
             })
+          ),
+          React.createElement('div', null,
+            React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Current Date"),
+            React.createElement('div', { className: "px-4 py-2 bg-gray-50 border border-gray-300 rounded-lg text-gray-900" },
+              getCurrentDate()
+            )
           )
         ),
+        // Urgency and Tax Type (tax only for procurement)
+        user.role === 'procurement'
+          ? React.createElement('div', { className: "grid grid-cols-2 gap-4" },
+              React.createElement('div', null,
+                React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Urgency Level *"),
+                React.createElement('select', {
+                  value: formData.urgency,
+                  onChange: (e) => setFormData({...formData, urgency: e.target.value}),
+                  className: "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                },
+                  React.createElement('option', { value: "standard" }, "Standard (30 days)"),
+                  React.createElement('option', { value: "urgent" }, "Urgent (15 days)"),
+                  React.createElement('option', { value: "critical" }, "Critical (7 days)")
+                )
+              ),
+              React.createElement('div', null,
+                React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Tax Type *"),
+                React.createElement('select', {
+                  value: formData.taxType,
+                  onChange: (e) => setFormData({...formData, taxType: e.target.value}),
+                  className: "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                },
+                  React.createElement('option', { value: "VAT" }, "VAT (16% Tax)"),
+                  React.createElement('option', { value: "TOT" }, "TOT (No Tax)")
+                )
+              )
+            )
+          : React.createElement('div', null,
+              React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Urgency Level *"),
+              React.createElement('select', {
+                value: formData.urgency,
+                onChange: (e) => setFormData({...formData, urgency: e.target.value}),
+                className: "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              },
+                React.createElement('option', { value: "standard" }, "Standard (30 days)"),
+                React.createElement('option', { value: "urgent" }, "Urgent (15 days)"),
+                React.createElement('option', { value: "critical" }, "Critical (7 days)")
+              )
+            ),
         React.createElement('div', null,
-          React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Current Date"),
-          React.createElement('div', { className: "px-4 py-2 bg-gray-50 border border-gray-300 rounded-lg text-gray-900" },
-            getCurrentDate()
-          )
-        ),
-        React.createElement('div', null,
-          React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Urgency Level *"),
-          React.createElement('select', {
-            value: formData.urgency,
-            onChange: (e) => setFormData({...formData, urgency: e.target.value}),
-            className: "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-          },
-            React.createElement('option', { value: "standard" }, "Standard (30 days)"),
-            React.createElement('option', { value: "urgent" }, "Urgent (15 days)"),
-            React.createElement('option', { value: "critical" }, "Critical (7 days)")
-          )
-        ),
-        React.createElement('div', null,
-          React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Justification *"),
+          React.createElement('label', { className: "block text-sm font-medium text-gray-700 mb-2" }, "Justification for Requisition *"),
           React.createElement('textarea', {
             rows: "4",
             value: formData.justification,
             onChange: (e) => setFormData({...formData, justification: e.target.value}),
             className: "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500",
-            placeholder: "Explain the business need for this requisition..."
+            placeholder: "Explain the business need for this requisition and all items listed above..."
           })
         ),
         // HOD Selection for Procurement
@@ -2418,6 +4054,24 @@ function ApproveRequisition({ req, user, data, setView, loadData }) {
   const selectedRate = Array.isArray(fxRates) ? fxRates.find(r => r.currency_code === vendorCurrency) : null;
   const totalCostZMW = vendorCurrency === 'ZMW' ? totalCost : (totalCost * (selectedRate?.rate_to_zmw || 1));
 
+  // Download Approved Purchase Requisition PDF
+  const downloadApprovedPDF = async () => {
+    try {
+      const blob = await api.downloadRequisitionPDF(req.id);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Approved_PR_${req.req_number}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error) {
+      console.error('Error downloading PDF:', error);
+      alert(error.message || 'Failed to download Approved Purchase Requisition PDF.');
+    }
+  };
+
   const handleProcurementApprove = async () => {
     if (!selectedVendor) {
       alert('Please select a vendor');
@@ -2481,11 +4135,23 @@ function ApproveRequisition({ req, user, data, setView, loadData }) {
         endpoint = `${API_URL}/requisitions/${req.id}/hod-approve`;
         successMessage = 'Requisition approved and sent to Procurement';
       } else if (user.role === 'finance') {
-        endpoint = `${API_URL}/requisitions/${req.id}/finance-approve`;
-        successMessage = 'Requisition approved and sent to MD';
+        // Finance can approve as HOD for pre-adjudication requisitions
+        if (req.status === 'pending_hod' && !req.has_adjudication) {
+          endpoint = `${API_URL}/requisitions/${req.id}/hod-approve`;
+          successMessage = 'Requisition approved as HOD and sent to Procurement';
+        } else {
+          endpoint = `${API_URL}/requisitions/${req.id}/finance-approve`;
+          successMessage = 'Requisition approved and sent to MD';
+        }
       } else if (user.role === 'md') {
-        endpoint = `${API_URL}/requisitions/${req.id}/md-approve`;
-        successMessage = 'Requisition fully approved!';
+        // MD can approve as HOD for pre-adjudication requisitions
+        if (req.status === 'pending_hod' && !req.has_adjudication) {
+          endpoint = `${API_URL}/requisitions/${req.id}/hod-approve`;
+          successMessage = 'Requisition approved as HOD and sent to Procurement';
+        } else {
+          endpoint = `${API_URL}/requisitions/${req.id}/md-approve`;
+          successMessage = 'Requisition fully approved!';
+        }
       } else {
         alert('Invalid role for approval');
         setLoading(false);
@@ -2552,9 +4218,19 @@ function ApproveRequisition({ req, user, data, setView, loadData }) {
         if (user.role === 'hod') {
           endpoint = `${API_URL}/requisitions/${req.id}/hod-approve`;
         } else if (user.role === 'finance') {
-          endpoint = `${API_URL}/requisitions/${req.id}/finance-approve`;
+          // Finance can reject as HOD for pre-adjudication requisitions
+          if (req.status === 'pending_hod' && !req.has_adjudication) {
+            endpoint = `${API_URL}/requisitions/${req.id}/hod-approve`;
+          } else {
+            endpoint = `${API_URL}/requisitions/${req.id}/finance-approve`;
+          }
         } else if (user.role === 'md') {
-          endpoint = `${API_URL}/requisitions/${req.id}/md-approve`;
+          // MD can reject as HOD for pre-adjudication requisitions
+          if (req.status === 'pending_hod' && !req.has_adjudication) {
+            endpoint = `${API_URL}/requisitions/${req.id}/hod-approve`;
+          } else {
+            endpoint = `${API_URL}/requisitions/${req.id}/md-approve`;
+          }
         }
 
         const response = await fetch(endpoint, {
@@ -2585,7 +4261,8 @@ function ApproveRequisition({ req, user, data, setView, loadData }) {
   };
 
   const canApprove = req.status === `pending_${user.role}` || (user.role === 'admin');
-  const isDraftEditable = user.role === 'initiator' && req.status === 'draft' && req.created_by === user.id;
+  const isDraftEditable = hasRole(user.role, 'initiator') && req.status === 'draft' && req.created_by === user.id;
+  const isInitiatorViewingApproved = hasRole(user.role, 'initiator') && (req.status === 'approved' || req.status === 'completed');
 
   const handleUpdateDraft = async () => {
     if (!description || !quantity) {
@@ -2974,7 +4651,7 @@ function ApproveRequisition({ req, user, data, setView, loadData }) {
               disabled: loading,
               className: "flex-1 min-w-[140px] bg-blue-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
             }, loading ? 'Updating...' : 'Update Draft')
-          ) : canApprove && React.createElement(React.Fragment, null,
+          ) : canApprove && !isInitiatorViewingApproved && React.createElement(React.Fragment, null,
             React.createElement('button', {
               onClick: handleApprove,
               disabled: loading || (user.role === 'procurement' && !selectedVendor),
@@ -2985,6 +4662,38 @@ function ApproveRequisition({ req, user, data, setView, loadData }) {
               disabled: loading,
               className: `flex-1 min-w-[140px] ${user.role === 'procurement' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-red-600 hover:bg-red-700'} text-white py-3 px-4 rounded-lg font-semibold transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed`
             }, loading ? 'Processing...' : (user.role === 'procurement' ? 'Save as Draft' : 'Reject'))
+          ),
+          // Show greyed out buttons for initiators viewing approved requisitions
+          isInitiatorViewingApproved && React.createElement(React.Fragment, null,
+            React.createElement('button', {
+              disabled: true,
+              className: "flex-1 min-w-[140px] bg-gray-300 text-gray-500 py-3 px-4 rounded-lg font-semibold cursor-not-allowed opacity-60",
+              title: "Initiators cannot approve requisitions"
+            }, "Approve (Not Available)"),
+            React.createElement('button', {
+              disabled: true,
+              className: "flex-1 min-w-[140px] bg-gray-300 text-gray-500 py-3 px-4 rounded-lg font-semibold cursor-not-allowed opacity-60",
+              title: "Initiators cannot reject requisitions"
+            }, "Reject (Not Available)")
+          ),
+          (req.status === 'approved' || req.status === 'completed') && React.createElement('button', {
+            onClick: downloadApprovedPDF,
+            className: "px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors flex items-center gap-2"
+          },
+            React.createElement('svg', {
+              className: "h-5 w-5",
+              fill: "none",
+              stroke: "currentColor",
+              viewBox: "0 0 24 24"
+            },
+              React.createElement('path', {
+                strokeLinecap: "round",
+                strokeLinejoin: "round",
+                strokeWidth: 2,
+                d: "M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+              })
+            ),
+            "Download Approved PR"
           ),
           React.createElement('button', {
             onClick: () => setView('dashboard'),
@@ -4771,11 +6480,21 @@ function ApprovalConsole({ user, setView, setSelectedReq, loadData }) {
         // HOD sees requisitions pending HOD approval
         filtered = data.filter(req => req.status === 'pending_hod');
       } else if (user.role === 'finance') {
-        // Finance sees requisitions pending finance approval
-        filtered = data.filter(req => req.status === 'pending_finance');
+        // Finance sees:
+        // 1. Requisitions pending finance approval
+        // 2. Requisitions pending_hod where finance is the assigned HOD (pre-adjudication)
+        filtered = data.filter(req =>
+          req.status === 'pending_finance' ||
+          (req.status === 'pending_hod' && !req.has_adjudication)
+        );
       } else if (user.role === 'md') {
-        // MD sees requisitions pending MD approval
-        filtered = data.filter(req => req.status === 'pending_md');
+        // MD sees:
+        // 1. Requisitions pending MD approval
+        // 2. Requisitions pending_hod where MD is the assigned HOD (pre-adjudication)
+        filtered = data.filter(req =>
+          req.status === 'pending_md' ||
+          (req.status === 'pending_hod' && !req.has_adjudication)
+        );
       } else if (user.role === 'admin') {
         // Admin sees all pending requisitions
         filtered = data.filter(req =>
@@ -5650,7 +7369,7 @@ function PurchaseOrders({ user }) {
         ? React.createElement('div', { className: "text-center py-12" },
             React.createElement('p', { className: "text-gray-500 text-lg mb-2" }, "No Purchase Orders Found"),
             React.createElement('p', { className: "text-gray-400 text-sm" },
-              user.role === 'initiator'
+              hasRole(user.role, 'initiator')
                 ? "You'll see Purchase Orders here once your requisitions are approved by MD"
                 : "Purchase Orders will appear here once requisitions are approved by MD"
             )
@@ -5708,6 +7427,7 @@ function BudgetManagement({ user }) {
   const [deptDetails, setDeptDetails] = useState(null);
   const [editingBudget, setEditingBudget] = useState(null);
   const [newAllocation, setNewAllocation] = useState('');
+  const [creatingBudget, setCreatingBudget] = useState(null);
 
   useEffect(() => {
     loadBudgets();
@@ -5716,10 +7436,10 @@ function BudgetManagement({ user }) {
   const loadBudgets = async () => {
     setLoading(true);
     try {
-      const data = await api.getBudgetOverview(fiscalYear);
+      const data = await api.getAllDepartmentsWithBudgets(fiscalYear);
       setBudgets(data);
     } catch (error) {
-      alert('Failed to load budgets: ' + error.message);
+      alert('Failed to load departments: ' + error.message);
     } finally {
       setLoading(false);
     }
@@ -5732,6 +7452,22 @@ function BudgetManagement({ user }) {
       setSelectedDept(department);
     } catch (error) {
       alert('Failed to load department details: ' + error.message);
+    }
+  };
+
+  const handleCreateBudget = async (department) => {
+    if (!newAllocation || newAllocation <= 0) {
+      alert('Please enter a valid allocation amount');
+      return;
+    }
+    try {
+      await api.createBudget(department, parseFloat(newAllocation), fiscalYear);
+      alert('Budget created successfully');
+      setCreatingBudget(null);
+      setNewAllocation('');
+      loadBudgets();
+    } catch (error) {
+      alert('Failed to create budget: ' + error.message);
     }
   };
 
@@ -5791,16 +7527,47 @@ function BudgetManagement({ user }) {
         )
       ),
       React.createElement('div', { className: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6" },
-        budgets.map(budget =>
+        budgets.map(dept =>
           React.createElement('div', {
-            key: budget.id,
+            key: dept.dept_id || dept.department,
             className: "p-4 border rounded-lg hover:shadow-md transition-shadow"
           },
             React.createElement('h3', {
-              onClick: () => loadDeptDetails(budget.department),
-              className: "font-semibold text-gray-800 mb-2 cursor-pointer hover:text-blue-600"
-            }, budget.department),
-            editingBudget === budget.id ? React.createElement('div', { className: "space-y-2 mb-2" },
+              onClick: () => dept.budget_id && loadDeptDetails(dept.department),
+              className: `font-semibold text-gray-800 mb-2 ${dept.budget_id ? 'cursor-pointer hover:text-blue-600' : 'text-gray-500'}`
+            }, dept.department),
+            React.createElement('p', { className: "text-xs text-gray-500 mb-2" }, `Code: ${dept.dept_code || 'N/A'}`),
+            !dept.budget_id ? React.createElement('div', { className: "space-y-2" },
+              React.createElement('p', { className: "text-sm text-orange-600 font-medium mb-2" }, "No Budget Allocated"),
+              creatingBudget === dept.department ? React.createElement('div', { className: "space-y-2" },
+                React.createElement('input', {
+                  type: "number",
+                  value: newAllocation,
+                  onChange: (e) => setNewAllocation(e.target.value),
+                  placeholder: "Enter allocation",
+                  className: "w-full px-2 py-1 border rounded text-sm"
+                }),
+                React.createElement('div', { className: "flex gap-1" },
+                  React.createElement('button', {
+                    onClick: () => handleCreateBudget(dept.department),
+                    className: "flex-1 px-2 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+                  }, "Create"),
+                  React.createElement('button', {
+                    onClick: () => {
+                      setCreatingBudget(null);
+                      setNewAllocation('');
+                    },
+                    className: "flex-1 px-2 py-1 bg-gray-300 text-gray-700 text-xs rounded hover:bg-gray-400"
+                  }, "Cancel")
+                )
+              ) : React.createElement('button', {
+                onClick: () => {
+                  setCreatingBudget(dept.department);
+                  setNewAllocation('');
+                },
+                className: "w-full px-2 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700"
+              }, "Allocate Budget")
+            ) : editingBudget === dept.budget_id ? React.createElement('div', { className: "space-y-2 mb-2" },
               React.createElement('input', {
                 type: "number",
                 value: newAllocation,
@@ -5810,7 +7577,7 @@ function BudgetManagement({ user }) {
               }),
               React.createElement('div', { className: "flex gap-1" },
                 React.createElement('button', {
-                  onClick: () => handleUpdateAllocation(budget.id),
+                  onClick: () => handleUpdateAllocation(dept.budget_id),
                   className: "flex-1 px-2 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700"
                 }, "Save"),
                 React.createElement('button', {
@@ -5823,30 +7590,31 @@ function BudgetManagement({ user }) {
               )
             ) : React.createElement('div', null,
               React.createElement('p', { className: "text-sm text-gray-600 mb-1" },
-                `Allocated: ZMW ${(budget.allocated_amount || 0).toLocaleString()}`
+                `Allocated: ZMW ${(dept.allocated_amount || 0).toLocaleString()}`
               ),
               React.createElement('p', { className: "text-sm text-gray-600 mb-1" },
-                `Committed: ZMW ${(budget.committed_amount || 0).toLocaleString()}`
+                `Committed: ZMW ${(dept.committed_amount || 0).toLocaleString()}`
               ),
               React.createElement('p', { className: "text-sm text-gray-600 mb-2" },
-                `Available: ZMW ${(budget.available_amount || 0).toLocaleString()}`
+                `Available: ZMW ${(dept.available_amount || 0).toLocaleString()}`
               )
             ),
-            React.createElement('div', {
-              className: `px-3 py-1 rounded-full text-xs font-semibold mb-2 ${getUtilizationColor(budget.utilization_percentage || 0)}`
-            }, `${(budget.utilization_percentage || 0).toFixed(1)}% Used`),
-            React.createElement('div', { className: "flex gap-1 mt-2" },
-              (user.role === 'finance' || user.role === 'md' || user.role === 'admin') && editingBudget !== budget.id && React.createElement('button', {
+            dept.budget_id && React.createElement('div', {
+              className: `px-3 py-1 rounded-full text-xs font-semibold mb-2 ${getUtilizationColor(dept.utilization_percentage || 0)}`
+            }, `${(dept.utilization_percentage || 0).toFixed(1)}% Used`),
+            dept.budget_id && React.createElement('div', { className: "flex gap-1 mt-2" },
+              (user.role === 'finance' || user.role === 'md' || user.role === 'admin') && editingBudget !== dept.budget_id && React.createElement('button', {
                 onClick: () => {
-                  setEditingBudget(budget.id);
-                  setNewAllocation(budget.allocated_amount);
+                  setEditingBudget(dept.budget_id);
+                  setNewAllocation(dept.allocated_amount);
                 },
                 className: "flex-1 px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200"
               }, "Edit"),
-              React.createElement('button', {
-                onClick: () => api.downloadDepartmentPDF(budget.department, fiscalYear),
+              // COMMENTED OUT: Departmental PDF download - replaced with approved requisition download for initiators
+              /* React.createElement('button', {
+                onClick: () => api.downloadDepartmentPDF(dept.department, fiscalYear),
                 className: "flex-1 px-2 py-1 bg-red-100 text-red-700 text-xs rounded hover:bg-red-200"
-              }, "PDF")
+              }, "PDF") */
             )
           )
         )
@@ -6250,7 +8018,7 @@ function QuotesAndAdjudication({ user, setView, loadData }) {
   const loadRequisitions = async () => {
     setLoading(true);
     try {
-      const data = await api.getRequisitions();
+      const data = await api.getRequisitions(user?.id, user?.role);
       // Filter requisitions that need quotes/adjudication or are in later stages
       const filtered = data.filter(r =>
         r.status === 'pending_procurement' || r.status === 'pending_finance' || r.status === 'pending_md' || r.status === 'approved'
@@ -6411,7 +8179,7 @@ function QuotesAndAdjudication({ user, setView, loadData }) {
 
   return React.createElement('div', { className: "space-y-6" },
     React.createElement('div', { className: "bg-white rounded-lg shadow-sm border p-6" },
-      React.createElement('h2', { className: "text-2xl font-bold text-gray-800 mb-4" }, "Quotes & Adjudication Management"),
+      React.createElement('h2', { className: "text-2xl font-bold text-gray-800 mb-4" }, "Adjudication Management"),
 
       // Requisitions list
       !selectedReq && React.createElement('div', null,

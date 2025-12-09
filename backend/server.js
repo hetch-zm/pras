@@ -17,6 +17,7 @@ const requestLogger = require('./middleware/requestLogger');
 const { logger, logAuth, logSecurity, logError } = require('./utils/logger');
 const { generateRequisitionPDF } = require('./utils/pdfGenerator');
 const database = require('./database');
+const { getUserById } = require('./database');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -124,7 +125,9 @@ function initializeDatabase() {
             role TEXT NOT NULL,
             department TEXT,
             is_hod BOOLEAN DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            assigned_hod INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (assigned_hod) REFERENCES users(id)
         )`);
 
         // Requisitions table
@@ -383,6 +386,30 @@ app.post('/api/auth/login', loginLimiter, validateLogin, async (req, res, next) 
     }
 });
 
+// Get current user info
+app.get('/api/auth/me', authenticate, (req, res, next) => {
+    try {
+        const user = getUserById(req.user.id);
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Return user info without password
+        res.json({
+            id: user.id,
+            username: user.username,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            department: user.department,
+            employee_number: user.employee_number
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
 // Refresh access token using refresh token
 app.post('/api/auth/refresh', async (req, res, next) => {
     try {
@@ -491,7 +518,21 @@ app.get('/api/requisitions', authenticate, (req, res, next) => {
         query += " AND r.created_by = ?";
         params.push(user_id);
     } else if (role === 'hod' && user_id) {
-        query += " AND u.department = (SELECT department FROM users WHERE id = ?)";
+        // HODs see requisitions from their department OR specifically assigned to them
+        query += " AND (u.department = (SELECT department FROM users WHERE id = ?) OR (r.assigned_to = ? AND r.assigned_role = 'hod'))";
+        params.push(user_id);
+        params.push(user_id);
+    } else if (role === 'finance' && user_id) {
+        // Finance sees requisitions assigned to them via universal assignment
+        query += " AND (r.assigned_to = ? AND r.assigned_role = 'finance')";
+        params.push(user_id);
+    } else if (role === 'md' && user_id) {
+        // MD sees requisitions assigned to them via universal assignment
+        query += " AND (r.assigned_to = ? AND r.assigned_role = 'md')";
+        params.push(user_id);
+    } else if (role === 'procurement' && user_id) {
+        // Procurement sees requisitions assigned to them via universal assignment
+        query += " AND (r.assigned_to = ? AND r.assigned_role = 'procurement')";
         params.push(user_id);
     }
     
@@ -708,7 +749,9 @@ app.put('/api/requisitions/:id/submit', authenticate, authorize('initiator', 'pr
 });
 
 // HOD Approval/Rejection
-app.put('/api/requisitions/:id/hod-approve', authenticate, authorize('hod', 'admin'), validateUpdateRequisition, (req, res, next) => {
+// Allow HOD, Finance, MD, and Admin to approve at HOD stage
+// Finance and MD can act as HOD for pre-adjudication requisitions
+app.put('/api/requisitions/:id/hod-approve', authenticate, authorize('hod', 'finance', 'md', 'admin'), validateUpdateRequisition, (req, res, next) => {
     try {
         const reqId = req.params.id;
         const { user_id, approved, comments } = req.body;
@@ -911,8 +954,13 @@ app.put('/api/requisitions/:id/md-approve', authenticate, authorize('md', 'admin
 
             // If approved, generate Purchase Order
             if (approved) {
-                // Get requisition details to generate PO number
-                db.get('SELECT req_number, total_amount, created_at FROM requisitions WHERE id = ?', [reqId], (err, req) => {
+                // Get requisition details to generate PO number with all pricing fields
+                db.get(`
+                    SELECT req_number, total_amount, created_at, unit_price, quantity,
+                           vendor_currency, selected_vendor, total_cost
+                    FROM requisitions
+                    WHERE id = ?
+                `, [reqId], (err, req) => {
                     if (err || !req) {
                         console.error('Error fetching requisition for PO:', err);
                         // Still return success for approval
@@ -949,34 +997,64 @@ app.put('/api/requisitions/:id/md-approve', authenticate, authorize('md', 'admin
                         }
                     });
 
-                    // Create PO record
-                    db.run(`
-                        INSERT INTO purchase_orders (po_number, requisition_id, total_amount, status, generated_by)
-                        VALUES (?, ?, ?, 'active', ?)
-                    `, [poNumber, reqId, req.total_amount, user_id], function(err) {
-                        if (err) {
-                            console.error('Error creating PO record:', err);
-                            return res.json({
-                                success: true,
-                                message: 'Requisition approved by MD successfully',
-                                status: newStatus,
-                                warning: 'PO record creation failed'
-                            });
-                        }
+                    // Calculate pricing breakdown for PO
+                    const unitPrice = req.unit_price || 0;
+                    const quantity = req.quantity || 1;
+                    const subtotal = unitPrice * quantity;
+                    const vatRate = 16.0; // 16% VAT
+                    const vatAmount = subtotal * (vatRate / 100);
+                    const grandTotal = subtotal + vatAmount;
+                    const currency = req.vendor_currency || 'ZMW';
 
-                        // Log PO generation
-                        db.run(`
-                            INSERT INTO audit_log (requisition_id, user_id, action, details)
-                            VALUES (?, ?, 'po_generated', ?)
-                        `, [reqId, user_id, `Purchase Order ${poNumber} generated automatically`]);
-
-                        res.json({
-                            success: true,
-                            message: 'Requisition approved by MD successfully and Purchase Order generated',
-                            status: newStatus,
-                            po_number: poNumber
+                    // Get vendor name from selected_vendor ID
+                    let selectedVendor = null;
+                    if (req.selected_vendor) {
+                        db.get('SELECT name FROM vendors WHERE id = ?', [req.selected_vendor], (err, vendor) => {
+                            if (vendor) {
+                                selectedVendor = vendor.name;
+                            }
+                            insertPurchaseOrder();
                         });
-                    });
+                    } else {
+                        insertPurchaseOrder();
+                    }
+
+                    function insertPurchaseOrder() {
+                        // Create PO record with comprehensive pricing breakdown
+                        db.run(`
+                            INSERT INTO purchase_orders (
+                                po_number, requisition_id, total_amount, status, generated_by,
+                                unit_price, quantity, subtotal, vat_rate, vat_amount, grand_total, currency, selected_vendor
+                            )
+                            VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        `, [
+                            poNumber, reqId, grandTotal, user_id,
+                            unitPrice, quantity, subtotal, vatRate, vatAmount, grandTotal, currency, selectedVendor
+                        ], function(err) {
+                            if (err) {
+                                console.error('Error creating PO record:', err);
+                                return res.json({
+                                    success: true,
+                                    message: 'Requisition approved by MD successfully',
+                                    status: newStatus,
+                                    warning: 'PO record creation failed'
+                                });
+                            }
+
+                            // Log PO generation
+                            db.run(`
+                                INSERT INTO audit_log (requisition_id, user_id, action, details)
+                                VALUES (?, ?, 'po_generated', ?)
+                            `, [reqId, user_id, `Purchase Order ${poNumber} generated automatically`]);
+
+                            res.json({
+                                success: true,
+                                message: 'Requisition approved by MD successfully and Purchase Order generated',
+                                status: newStatus,
+                                po_number: poNumber
+                            });
+                        });
+                    }
                 });
             } else {
                 // Rejection - no PO generation
@@ -986,6 +1064,147 @@ app.put('/api/requisitions/:id/md-approve', authenticate, authorize('md', 'admin
                     status: newStatus
                 });
             }
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
+// Admin Override - Skip stage or reassign department
+app.put('/api/requisitions/:id/admin-override', authenticate, authorize('admin'), (req, res, next) => {
+    try {
+        const reqId = req.params.id;
+        const { action, new_status, new_department, comment } = req.body;
+
+        if (!action || !['skip_stage', 'reassign_department'].includes(action)) {
+            return res.status(400).json({ error: 'Invalid action. Must be skip_stage or reassign_department' });
+        }
+
+        if (action === 'skip_stage') {
+            // Skip current approval stage
+            if (!new_status || !comment) {
+                return res.status(400).json({ error: 'new_status and comment are required for skip_stage' });
+            }
+
+            db.run(`
+                UPDATE requisitions
+                SET status = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            `, [new_status, reqId], function(err) {
+                if (err) {
+                    logError(err, { context: 'admin_skip_stage', requisition_id: reqId });
+                    return next(new AppError('Database error', 500));
+                }
+
+                if (this.changes === 0) {
+                    return res.status(404).json({ error: 'Requisition not found' });
+                }
+
+                // Log the admin override
+                db.run(`
+                    INSERT INTO audit_log (requisition_id, user_id, action, details)
+                    VALUES (?, ?, ?, ?)
+                `, [reqId, req.user.id, 'admin_skip_stage', `Admin skipped stage to ${new_status}: ${comment}`]);
+
+                logSecurity('admin_override_skip_stage', {
+                    requisition_id: reqId,
+                    user_id: req.user.id,
+                    new_status,
+                    reason: comment
+                });
+
+                res.json({
+                    success: true,
+                    message: `Successfully moved to ${new_status}`,
+                    status: new_status
+                });
+            });
+
+        } else if (action === 'reassign_department') {
+            // Reassign to different department
+            if (!new_department) {
+                return res.status(400).json({ error: 'new_department is required for reassign_department' });
+            }
+
+            db.run(`
+                UPDATE requisitions
+                SET department = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            `, [new_department, reqId], function(err) {
+                if (err) {
+                    logError(err, { context: 'admin_reassign_department', requisition_id: reqId });
+                    return next(new AppError('Database error', 500));
+                }
+
+                if (this.changes === 0) {
+                    return res.status(404).json({ error: 'Requisition not found' });
+                }
+
+                // Log the admin override
+                db.run(`
+                    INSERT INTO audit_log (requisition_id, user_id, action, details)
+                    VALUES (?, ?, ?, ?)
+                `, [reqId, req.user.id, 'admin_reassign_dept', `Admin reassigned to department: ${new_department}`]);
+
+                logSecurity('admin_override_reassign', {
+                    requisition_id: reqId,
+                    user_id: req.user.id,
+                    new_department
+                });
+
+                res.json({
+                    success: true,
+                    message: `Successfully reassigned to ${new_department}`,
+                    department: new_department
+                });
+            });
+        }
+    } catch (error) {
+        next(error);
+    }
+});
+
+// Get Purchase Order by Requisition ID
+app.get('/api/purchase-orders/by-requisition/:requisitionId', authenticate, (req, res, next) => {
+    try {
+        const requisitionId = req.params.requisitionId;
+
+        // First check if requisition exists and get its status
+        db.get(`
+            SELECT id, req_number, status FROM requisitions WHERE id = ?
+        `, [requisitionId], (err, requisition) => {
+            if (err) {
+                logError(err, { context: 'get_requisition_for_po', requisition_id: requisitionId });
+                return next(new AppError('Database error', 500));
+            }
+
+            if (!requisition) {
+                return next(new AppError('Requisition not found', 404));
+            }
+
+            // Check if requisition is rejected
+            if (requisition.status === 'rejected') {
+                return next(new AppError('Cannot generate purchase order for rejected requisition', 400));
+            }
+
+            // Now get the purchase order
+            db.get(`
+                SELECT * FROM purchase_orders
+                WHERE requisition_id = ?
+            `, [requisitionId], (err, po) => {
+                if (err) {
+                    logError(err, { context: 'get_po_by_requisition', requisition_id: requisitionId });
+                    return next(new AppError('Database error', 500));
+                }
+
+                if (!po) {
+                    return next(new AppError('Purchase order not found. The requisition may not be fully approved yet.', 404));
+                }
+
+                res.json(po);
+            });
         });
     } catch (error) {
         next(error);
@@ -1146,12 +1365,19 @@ app.get('/api/purchase-orders/:id/pdf', authenticate, (req, res, next) => {
         const poId = req.params.id;
         const user = req.user;
 
-        // Get PO with full details
+        // Get PO with full details including pricing breakdown
+        // Also fetch requisition data as fallback for old PO records (backward compatibility)
         db.get(`
-            SELECT po.*,
+            SELECT po.id, po.po_number, po.requisition_id, po.total_amount, po.status,
+                   po.issued_to_vendor, po.delivery_date, po.terms_conditions, po.notes,
+                   po.generated_by, po.created_at, po.updated_at,
+                   po.unit_price, po.quantity, po.subtotal, po.vat_rate, po.vat_amount,
+                   po.grand_total, po.currency, po.selected_vendor,
                    r.req_number, r.description, r.delivery_location, r.urgency, r.required_date,
-                   r.account_code, r.created_by, r.total_amount, r.quantity, r.unit_price, r.total_cost,
-                   r.selected_vendor, r.vendor_currency,
+                   r.account_code, r.created_by, r.selected_vendor as req_selected_vendor,
+                   r.unit_price as req_unit_price, r.quantity as req_quantity,
+                   r.vendor_currency as req_vendor_currency,
+                   r.total_cost as req_total_cost,
                    r.created_at as req_created_at,
                    u.full_name as created_by_name, u.email as created_by_email, u.department as created_by_department,
                    md.full_name as md_name,
@@ -1178,303 +1404,386 @@ app.get('/api/purchase-orders/:id/pdf', authenticate, (req, res, next) => {
             }
 
             // Check access permissions
+            // All roles can access approved/rejected requisitions based on their visibility scope
             const hasAccess =
                 user.role === 'admin' ||
                 user.role === 'md' ||
                 user.role === 'finance' ||
                 user.role === 'procurement' ||
                 (user.role === 'initiator' && po.created_by === user.id) ||
-                (user.role === 'hod' && po.hod_approved_by === user.id);
+                (user.role === 'hod' && po.created_by_department === user.department);
 
             if (!hasAccess) {
                 return res.status(403).json({ error: 'Access denied to this Approved Purchase Requisition' });
             }
 
-            // Generate PDF directly (using requisition data, not items)
+            // Generate PDF using preferred format (matching pdfGenerator.js style)
             try {
                     const PDFDocument = require('pdfkit');
                     const fs = require('fs');
                     const path = require('path');
-                    const doc = new PDFDocument({ margin: 50 });
+                    const doc = new PDFDocument({ margin: 40, size: 'A4' });
 
                     res.setHeader('Content-Type', 'application/pdf');
                     res.setHeader('Content-Disposition', `attachment; filename="APR_${po.req_number}.pdf"`);
 
                     doc.pipe(res);
 
-                    // Add logo if it exists
-                    const logoPath = path.join(__dirname, 'assets', 'logo.png');
-                    if (fs.existsSync(logoPath)) {
-                        try {
-                            doc.image(logoPath, 50, 45, { width: 120 });
-                        } catch (logoError) {
-                            console.warn('Logo exists but failed to load:', logoError.message);
+                    // ===== HEADER SECTION =====
+                    // Add company logo - CENTERED at top
+                    try {
+                        const logoPath = path.join(__dirname, 'assets', 'logo.jpeg');
+                        if (fs.existsSync(logoPath)) {
+                            // Center the logo (A4 width = 595, logo width = 80, so x = (595 - 80) / 2 = 257.5)
+                            doc.image(logoPath, 257.5, 40, { width: 80, height: 80 });
+                        } else {
+                            // Fallback to text if logo not found - centered
+                            doc.fontSize(28)
+                               .font('Helvetica-Bold')
+                               .fillColor('#0066cc')
+                               .text('KSB', 50, 60, { align: 'center', width: 495 });
                         }
+                    } catch (err) {
+                        // Fallback to text on error - centered
+                        doc.fontSize(28)
+                           .font('Helvetica-Bold')
+                           .fillColor('#0066cc')
+                           .text('KSB', 50, 60, { align: 'center', width: 495 });
                     }
 
-                    // Header with company name (aligned right if logo exists)
-                    const hasLogo = fs.existsSync(logoPath);
-                    if (hasLogo) {
-                        doc.fontSize(16).font('Helvetica-Bold').text('KSB Zambia', 200, 50, { align: 'right' });
-                        doc.fontSize(9).font('Helvetica').fillColor('gray').text('Musapas Business Park, Kamfinsa Junction', 200, 68, { align: 'right' });
-                        doc.fontSize(9).text('Ndola/Kitwe Dual Carriageway, Kitwe', 200, 80, { align: 'right' });
-                        doc.fontSize(9).text('Tel.: +260 968 670 002 | Mobil: +260 966 780 419', 200, 92, { align: 'right' });
-                        doc.fillColor('black');
-                        doc.moveDown(3);
-                    } else {
-                        doc.fontSize(14).font('Helvetica-Bold').text('KSB Zambia', { align: 'center' });
-                        doc.fontSize(9).font('Helvetica').fillColor('gray').text('Musapas Business Park, Kamfinsa Junction', { align: 'center' });
-                        doc.fontSize(9).text('Ndola/Kitwe Dual Carriageway, Kitwe', { align: 'center' });
-                        doc.fontSize(9).text('Tel.: +260 968 670 002 | Mobil: +260 966 780 419', { align: 'center' });
-                        doc.fillColor('black');
-                        doc.moveDown(2);
-                    }
+                    // ===== TITLE - Below logo =====
+                    doc.fontSize(18)
+                       .font('Helvetica-Bold')
+                       .fillColor('#0066cc')
+                       .text('APPROVED PURCHASE REQUISITION', 50, 135, { align: 'center', width: 495 });
 
-                    // Title and Document Details
-                    doc.fontSize(20).font('Helvetica-Bold').fillColor('#0070AF').text('APPROVED PURCHASE REQUISITION', { align: 'center' });
-                    doc.fillColor('black');
-                    doc.moveDown(0.8);
+                    // Document Number section
+                    let currentY = 160;
+                    doc.fontSize(10)
+                       .font('Helvetica-Bold')
+                       .fillColor('#000000')
+                       .text('Document Number:', 50, currentY, { align: 'center', width: 495 });
 
-                    // Document number box with border
-                    const docNumY = doc.y;
-                    doc.fontSize(10).font('Helvetica-Bold').text('Document Number:', { align: 'center' });
-                    doc.fontSize(14).font('Helvetica-Bold').fillColor('#0070AF').text(po.req_number, { align: 'center' });
-                    doc.fillColor('black');
-                    doc.fontSize(9).font('Helvetica').text(`Issue Date: ${new Date(po.created_at).toLocaleDateString('en-GB')}`, { align: 'center' });
-                    doc.moveDown(2);
+                    currentY += 15;
+                    doc.fontSize(14)
+                       .font('Helvetica-Bold')
+                       .fillColor('#0066cc')
+                       .text(po.req_number, 50, currentY, { align: 'center', width: 495 });
 
-                    // Company Info (left) and Vendor Info (right)
-                    const startY = doc.y;
+                    currentY += 18;
+                    doc.fontSize(9)
+                       .font('Helvetica')
+                       .fillColor('#666666')
+                       .text(`Issue Date: ${new Date(po.created_at).toLocaleDateString('en-GB', {day: '2-digit', month: '2-digit', year: 'numeric'})}`, 50, currentY, { align: 'center', width: 495 });
 
-                    // Draw boxes for better presentation
-                    const boxHeight = 90;
-                    doc.rect(50, startY, 230, boxHeight).stroke('#CCCCCC');
-                    doc.rect(320, startY, 225, boxHeight).stroke('#CCCCCC');
+                    // ===== TWO-COLUMN LAYOUT WITH BOXES =====
+                    currentY += 25; // Add spacing after Issue Date
 
-                    // Company Info
-                    doc.fontSize(10).font('Helvetica-Bold').fillColor('#0070AF').text('REQUISITIONING OFFICE:', 55, startY + 5);
-                    doc.fillColor('black').font('Helvetica');
-                    doc.fontSize(9).text('KSB Zambia', 55, startY + 20);
-                    doc.text('Musapas Business Park, Kamfinsa Junction', 55, startY + 33);
-                    doc.text('Ndola/Kitwe Dual Carriageway, Kitwe', 55, startY + 46);
-                    doc.text('Tel.: +260 968 670 002', 55, startY + 59);
-                    doc.text('Mobile: +260 966 780 419', 55, startY + 72);
+                    // Left Box - REQUISITIONING OFFICE
+                    const leftBoxX = 50;
+                    const rightBoxX = 305;
+                    const boxWidth = 245;
+                    const boxHeight = 110;
 
-                    // Vendor Info (from requisition, not items)
-                    const vendorName = po.vendor_name || po.selected_vendor || 'To Be Determined';
-                    const vendorEmail = po.vendor_email || '';
-                    const vendorPhone = po.vendor_phone || '';
+                    doc.rect(leftBoxX, currentY, boxWidth, boxHeight)
+                       .strokeColor('#0066cc')
+                       .lineWidth(1.5)
+                       .stroke();
 
-                    doc.fontSize(10).font('Helvetica-Bold').fillColor('#0070AF').text('APPROVED VENDOR:', 325, startY + 5);
-                    doc.fillColor('black').font('Helvetica');
-                    doc.fontSize(9).text(vendorName, 325, startY + 20);
-                    if (vendorEmail) doc.text(`Email: ${vendorEmail}`, 325, startY + 33);
-                    if (vendorPhone) doc.text(`Phone: ${vendorPhone}`, 325, startY + 46);
+                    doc.fontSize(9)
+                       .font('Helvetica-Bold')
+                       .fillColor('#0066cc')
+                       .text('REQUISITIONING OFFICE:', leftBoxX + 10, currentY + 8);
 
-                    doc.moveDown(7);
+                    let leftY = currentY + 26;
+                    doc.fontSize(9)
+                       .font('Helvetica-Bold')
+                       .fillColor('#000000')
+                       .text('KSB Zambia', leftBoxX + 10, leftY);
 
-                    // Requisition Information Section (2-column layout)
-                    doc.fontSize(11).font('Helvetica-Bold').fillColor('#0070AF').text('REQUISITION DETAILS', 50, doc.y);
-                    doc.fillColor('black');
-                    doc.moveDown(0.5);
+                    leftY += 14;
+                    doc.fontSize(8)
+                       .font('Helvetica')
+                       .fillColor('#333333')
+                       .text('Musapas Business Park, Kamfinsa Junction', leftBoxX + 10, leftY, { width: boxWidth - 20 });
 
-                    const infoStartY = doc.y;
-                    doc.fontSize(8).font('Helvetica-Bold');
+                    leftY += 11;
+                    doc.text('Ndola/Kitwe Dual Carriageway, Kitwe', leftBoxX + 10, leftY, { width: boxWidth - 20 });
 
-                    // Left column labels
-                    doc.text('Requisition #:', 50, infoStartY);
-                    doc.text('Department:', 50, infoStartY + 12);
-                    doc.text('Required Date:', 50, infoStartY + 24);
-                    doc.text('Urgency:', 50, infoStartY + 36);
+                    leftY += 11;
+                    doc.text('Tel.: +260 968 670 002', leftBoxX + 10, leftY, { width: boxWidth - 20 });
 
-                    // Left column values
-                    doc.font('Helvetica');
-                    doc.text(po.req_number, 140, infoStartY);
-                    doc.text(po.created_by_department, 140, infoStartY + 12);
-                    doc.text(new Date(po.required_date).toLocaleDateString(), 140, infoStartY + 24);
-                    doc.text(po.urgency.toUpperCase(), 140, infoStartY + 36);
+                    leftY += 11;
+                    doc.text('Mobile: +260 966 780 419', leftBoxX + 10, leftY, { width: boxWidth - 20 });
 
-                    // Right column labels
-                    doc.font('Helvetica-Bold');
-                    doc.text('Delivery Location:', 320, infoStartY);
-                    doc.text('Account Code:', 320, infoStartY + 12);
-                    doc.text('Requested By:', 320, infoStartY + 24);
+                    // Right Box - APPROVED VENDOR
+                    doc.rect(rightBoxX, currentY, boxWidth, boxHeight)
+                       .strokeColor('#0066cc')
+                       .lineWidth(1.5)
+                       .stroke();
 
-                    // Right column values
-                    doc.font('Helvetica');
-                    doc.text(po.delivery_location || 'Office', 420, infoStartY);
-                    doc.text(po.account_code || 'N/A', 420, infoStartY + 12);
-                    doc.text(po.created_by_name, 420, infoStartY + 24);
+                    doc.fontSize(9)
+                       .font('Helvetica-Bold')
+                       .fillColor('#0066cc')
+                       .text('APPROVED VENDOR:', rightBoxX + 10, currentY + 8);
 
-                    doc.moveDown(3.5);
+                    let rightY = currentY + 26;
+                    const vendorName = po.selected_vendor || po.vendor_name || po.req_selected_vendor || 'To Be Determined';
+                    doc.fontSize(9)
+                       .font('Helvetica-Bold')
+                       .fillColor('#000000')
+                       .text(vendorName, rightBoxX + 10, rightY, { width: boxWidth - 20 });
 
-                    // Item Description Box
-                    const descBoxY = doc.y;
-                    doc.fontSize(8).font('Helvetica-Bold').text('Item Description:', 50, descBoxY);
-                    doc.moveDown(0.2);
+                    // Move currentY down after boxes
+                    currentY = currentY + boxHeight + 20;
 
-                    // Draw a light border box for description
-                    const descTextY = doc.y;
-                    doc.fontSize(8).font('Helvetica');
-                    doc.fillColor('#333333');
-                    doc.text(po.description || 'N/A', 50, descTextY, { width: 495, align: 'left' });
-                    doc.fillColor('black');
+                    // ===== REQUISITION DETAILS SECTION =====
+                    doc.fontSize(11)
+                       .font('Helvetica-Bold')
+                       .fillColor('#0066cc')
+                       .text('REQUISITION DETAILS', 50, currentY);
 
-                    doc.moveDown(1);
+                    currentY += 18;
 
-                    // Items Table
-                    doc.fontSize(11).font('Helvetica-Bold').fillColor('#0070AF').text('APPROVED LINE ITEMS', 50, doc.y);
-                    doc.fillColor('black');
-                    doc.moveDown(0.5);
+                    // Details in two columns
+                    const col1X = 50;
+                    const col2X = 180;
+                    const col3X = 310;
+                    const col4X = 420;
 
-                    const tableTop = doc.y;
+                    doc.fontSize(9)
+                       .font('Helvetica-Bold')
+                       .fillColor('#000000')
+                       .text('Requisition #:', col1X, currentY)
+                       .font('Helvetica')
+                       .text(po.req_number, col2X, currentY);
 
-                    // Draw table border (compact)
-                    doc.rect(50, tableTop, 495, 42).stroke();
+                    doc.font('Helvetica-Bold')
+                       .text('Delivery Location:', col3X, currentY)
+                       .font('Helvetica')
+                       .text(po.delivery_location || 'Office', col4X, currentY);
 
-                    // Table headers with background
-                    doc.fontSize(8).font('Helvetica-Bold');
+                    currentY += 15;
+                    doc.font('Helvetica-Bold')
+                       .text('Department:', col1X, currentY)
+                       .font('Helvetica')
+                       .text(po.created_by_department || 'Operations', col2X, currentY);
 
-                    // Header row background (light gray)
-                    doc.fillColor('#F5F5F5').rect(50, tableTop, 495, 16).fill();
-                    doc.fillColor('black');
+                    doc.font('Helvetica-Bold')
+                       .text('Account Code:', col3X, currentY)
+                       .font('Helvetica')
+                       .text(po.account_code || 'N/A', col4X, currentY);
 
-                    // Column headers
-                    const headerY = tableTop + 5;
-                    doc.text('Item Description', 55, headerY, { width: 210 });
-                    doc.text('Qty', 275, headerY, { width: 40, align: 'center' });
-                    doc.text('Unit Price (ZMW)', 325, headerY, { width: 90, align: 'right' });
-                    doc.text('Amount (ZMW)', 425, headerY, { width: 110, align: 'right' });
+                    currentY += 15;
+                    doc.font('Helvetica-Bold')
+                       .text('Required Date:', col1X, currentY)
+                       .font('Helvetica')
+                       .text(new Date(po.required_date || po.created_at).toLocaleDateString('en-GB', {day: '2-digit', month: '2-digit', year: 'numeric'}), col2X, currentY);
 
-                    // Horizontal line after header
-                    doc.moveTo(50, tableTop + 16).lineTo(545, tableTop + 16).stroke();
+                    doc.font('Helvetica-Bold')
+                       .text('Requested By:', col3X, currentY)
+                       .font('Helvetica')
+                       .text(po.created_by_name || 'N/A', col4X, currentY);
 
-                    // Table data row
-                    doc.font('Helvetica');
-                    const dataY = tableTop + 21;
+                    currentY += 15;
+                    doc.font('Helvetica-Bold')
+                       .text('Urgency:', col1X, currentY)
+                       .font('Helvetica')
+                       .text((po.urgency || 'STANDARD').toLowerCase(), col2X, currentY);
 
-                    // Calculate prices from requisition data
-                    const quantity = po.quantity || 1;
-                    const unitPrice = po.unit_price || 0;
-                    const subtotal = quantity * unitPrice;
+                    // Item Description
+                    currentY += 20;
+                    doc.fontSize(9)
+                       .font('Helvetica-Bold')
+                       .fillColor('#000000')
+                       .text('Item Description:', 50, currentY);
 
-                    // Display the single item (requisition) - abbreviated description
-                    const shortDesc = po.description.length > 35 ? po.description.substring(0, 32) + '...' : po.description;
-                    doc.fontSize(8).text(shortDesc, 55, dataY, { width: 210 });
-                    doc.text(quantity.toString(), 275, dataY, { width: 40, align: 'center' });
-                    doc.text(unitPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}), 325, dataY, { width: 90, align: 'right' });
-                    doc.text(subtotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}), 425, dataY, { width: 110, align: 'right' });
+                    currentY += 12;
+                    doc.fontSize(9)
+                       .font('Helvetica')
+                       .text(po.description || 'N/A', 50, currentY, { width: 495 });
 
-                    // Vertical lines for columns
-                    doc.moveTo(270, tableTop).lineTo(270, tableTop + 42).stroke();
-                    doc.moveTo(320, tableTop).lineTo(320, tableTop + 42).stroke();
-                    doc.moveTo(420, tableTop).lineTo(420, tableTop + 42).stroke();
+                    //===== APPROVED LINE ITEMS SECTION =====
+                    currentY += 25; // Add spacing before line items section
+                    doc.fontSize(11)
+                       .font('Helvetica-Bold')
+                       .fillColor('#0066cc')
+                       .text('APPROVED LINE ITEMS', 50, currentY);
 
-                    let y = tableTop + 47;
+                    // Get items from requisition_items table for accurate pricing
+                    db.all(`
+                        SELECT ri.*, v.name as vendor_name
+                        FROM requisition_items ri
+                        LEFT JOIN vendors v ON ri.vendor_id = v.id
+                        WHERE ri.requisition_id = ?
+                        ORDER BY ri.id
+                    `, [po.requisition_id], (err, items) => {
+                        if (err) {
+                            logError(err, { context: 'get_items_for_po_pdf', po_id: poId });
+                            // Fallback to old method if items query fails
+                            items = [];
+                        }
 
-                    // Financial Summary Box (right-aligned, compact)
-                    const summaryX = 350;
+                        const currency = po.currency || po.req_vendor_currency || 'ZMW';
 
-                    doc.fontSize(8).font('Helvetica');
+                        // Table header - simple with borders
+                        currentY += 18; // Add spacing before table
 
-                    // Subtotal row
-                    doc.text('Subtotal:', summaryX, y, { width: 120, align: 'left' });
-                    doc.text(`ZMW ${subtotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`, summaryX + 120, y, { width: 75, align: 'right' });
-                    y += 12;
+                        doc.rect(50, currentY, 495, 22)
+                           .strokeColor('#0066cc')
+                           .fillColor('#f0f7ff')
+                           .fillAndStroke();
 
-                    // VAT row
-                    const vatAmount = subtotal * 0.16;
-                    doc.text('VAT (16%):', summaryX, y, { width: 120, align: 'left' });
-                    doc.text(`ZMW ${vatAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`, summaryX + 120, y, { width: 75, align: 'right' });
-                    y += 12;
+                        doc.fillColor('#000000')
+                           .fontSize(8)
+                           .font('Helvetica-Bold')
+                           .text('Item Description', 58, currentY + 7, { width: 240 })
+                           .text('Qty', 310, currentY + 7, { width: 35, align: 'center' })
+                           .text(`Unit Price (${currency})`, 355, currentY + 7, { width: 85, align: 'right' })
+                           .text(`Amount (${currency})`, 455, currentY + 7, { width: 80, align: 'right' });
 
-                    // Line before grand total
-                    doc.moveTo(summaryX, y).lineTo(545, y).stroke();
-                    y += 6;
+                        currentY += 22;
 
-                    // Grand Total row (bold and larger)
-                    const grandTotalWithVAT = subtotal + vatAmount;
-                    doc.fontSize(9).font('Helvetica-Bold');
-                    doc.fillColor('#0070AF');
-                    doc.text('GRAND TOTAL:', summaryX, y, { width: 120, align: 'left' });
-                    doc.text(`ZMW ${grandTotalWithVAT.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`, summaryX + 120, y, { width: 75, align: 'right' });
-                    doc.fillColor('black');
+                        // Calculate subtotal from all items
+                        let subtotal = 0;
 
-                    doc.moveDown(2);
+                        if (items.length > 0) {
+                            // Display each item from requisition_items table
+                            items.forEach((item, index) => {
+                                const rowHeight = 24;
 
-                    // Approval Chain Section with border box
-                    const approvalY = doc.y;
-                    doc.fontSize(10).font('Helvetica-Bold').fillColor('#0070AF').text('AUTHORIZATION & APPROVAL TRAIL', 50, approvalY);
-                    doc.fillColor('black');
-                    doc.moveDown(0.4);
+                                // Draw row border
+                                doc.rect(50, currentY, 495, rowHeight)
+                                   .strokeColor('#cccccc')
+                                   .lineWidth(0.5)
+                                   .stroke();
 
-                    const approvalStartY = doc.y;
-                    const approvalBoxY = approvalStartY - 5;
+                                const itemUnitPrice = item.unit_price || 0;
+                                const itemTotal = item.total_price || 0;
+                                subtotal += itemTotal;
 
-                    // Draw approval box border
-                    doc.rect(50, approvalBoxY, 495, 75).stroke('#CCCCCC');
+                                doc.fillColor('#000000')
+                                   .fontSize(8)
+                                   .font('Helvetica')
+                                   .text(item.item_name || 'Item Description', 58, currentY + 8, { width: 240 })
+                                   .text((item.quantity || 0).toString(), 310, currentY + 8, { width: 35, align: 'center' })
+                                   .text(itemUnitPrice.toFixed(2), 355, currentY + 8, { width: 85, align: 'right' })
+                                   .text(itemTotal.toFixed(2), 455, currentY + 8, { width: 80, align: 'right' });
 
-                    doc.fontSize(8).font('Helvetica');
+                                currentY += rowHeight;
+                            });
+                        } else {
+                            // Fallback to old method if no items found (for backward compatibility)
+                            const rowHeight = 24;
+                            const quantity = po.quantity || po.req_quantity || 1;
+                            const unitPrice = po.unit_price || po.req_unit_price || 0;
+                            subtotal = po.subtotal || (quantity * unitPrice);
 
-                    let approvalRow = 0;
-                    const lineHeight = 13;
-                    const leftPadding = 60;
+                            doc.rect(50, currentY, 495, rowHeight)
+                               .strokeColor('#cccccc')
+                               .lineWidth(0.5)
+                               .stroke();
 
-                    // Requested by
-                    doc.font('Helvetica-Bold').text('Initiated by:', leftPadding, approvalStartY + (approvalRow * lineHeight));
-                    doc.font('Helvetica').text(po.created_by_name, leftPadding + 85, approvalStartY + (approvalRow * lineHeight));
-                    approvalRow++;
+                            doc.fillColor('#000000')
+                               .fontSize(8)
+                               .font('Helvetica')
+                               .text(po.description || 'Item Description', 58, currentY + 8, { width: 240 })
+                               .text(quantity.toString(), 310, currentY + 8, { width: 35, align: 'center' })
+                               .text(unitPrice.toFixed(2), 355, currentY + 8, { width: 85, align: 'right' })
+                               .text(subtotal.toFixed(2), 455, currentY + 8, { width: 80, align: 'right' });
 
-                    // HOD Approved
-                    if (po.hod_name) {
-                        doc.font('Helvetica-Bold').text('HOD Approval:', leftPadding, approvalStartY + (approvalRow * lineHeight));
-                        doc.font('Helvetica').fillColor('#008000').text(`✓ ${po.hod_name}`, leftPadding + 85, approvalStartY + (approvalRow * lineHeight));
-                        doc.fillColor('black');
-                        approvalRow++;
-                    }
+                            currentY += rowHeight;
+                        }
 
-                    // Procurement
-                    if (po.procurement_name) {
-                        doc.font('Helvetica-Bold').text('Procurement:', leftPadding, approvalStartY + (approvalRow * lineHeight));
-                        doc.font('Helvetica').fillColor('#008000').text(`✓ ${po.procurement_name}`, leftPadding + 85, approvalStartY + (approvalRow * lineHeight));
-                        doc.fillColor('black');
-                        approvalRow++;
-                    }
+                        // Totals section - aligned right
+                        currentY += 15;
 
-                    // Finance Approved
-                    if (po.finance_name) {
-                        doc.font('Helvetica-Bold').text('Finance Approval:', leftPadding, approvalStartY + (approvalRow * lineHeight));
-                        doc.font('Helvetica').fillColor('#008000').text(`✓ ${po.finance_name}`, leftPadding + 85, approvalStartY + (approvalRow * lineHeight));
-                        doc.fillColor('black');
-                        approvalRow++;
-                    }
+                        // Calculate VAT and grand total
+                        const vatRate = 16.0;
+                        const vatAmount = subtotal * (vatRate / 100);
+                        const grandTotal = subtotal + vatAmount;
 
-                    // MD Approved
-                    if (po.md_name) {
-                        doc.font('Helvetica-Bold').text('MD Approval:', leftPadding, approvalStartY + (approvalRow * lineHeight));
-                        doc.font('Helvetica').fillColor('#008000').text(`✓ ${po.md_name}`, leftPadding + 85, approvalStartY + (approvalRow * lineHeight));
-                        doc.fillColor('black');
-                        approvalRow++;
-                    }
+                        // Subtotal
+                        doc.fontSize(9)
+                           .font('Helvetica')
+                           .fillColor('#000000')
+                           .text('Subtotal:', 380, currentY, { align: 'left' })
+                           .text(`${currency} ${subtotal.toFixed(2)}`, 455, currentY, { align: 'right', width: 90 });
 
-                    doc.moveDown(approvalRow * 0.3 + 2);
+                        currentY += 14;
 
-                    // Footer with document status
-                    doc.fontSize(7).fillColor('gray').font('Helvetica-Oblique');
-                    doc.text('This document represents an officially approved purchase requisition.', { align: 'center' });
-                    doc.text('All authorizations have been verified through the system approval workflow.', { align: 'center' });
-                    doc.moveDown(0.3);
-                    doc.fontSize(7).font('Helvetica');
-                    doc.text(`Document generated on: ${new Date().toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' })}`, { align: 'center' });
-                    doc.text('KSB Zambia - Purchase Requisition Approval System (PRAS)', { align: 'center' });
+                        // VAT
+                        doc.text('VAT (16%):', 380, currentY, { align: 'left' })
+                           .text(`${currency} ${vatAmount.toFixed(2)}`, 455, currentY, { align: 'right', width: 90 });
 
-                    doc.end();
+                        currentY += 18;
 
-                    // Log PDF generation
-                    db.run(`
-                        INSERT INTO audit_log (requisition_id, user_id, action, details)
-                        VALUES (?, ?, 'approved_requisition_pdf_downloaded', ?)
-                    `, [po.requisition_id, user.id, `Approved Purchase Requisition PDF downloaded: ${po.req_number}`]);
+                        // Grand Total - Bold and Blue
+                        doc.fontSize(10)
+                           .font('Helvetica-Bold')
+                           .fillColor('#0066cc')
+                           .text('GRAND TOTAL:', 380, currentY, { align: 'left' })
+                           .text(`${currency} ${grandTotal.toFixed(2)}`, 455, currentY, { align: 'right', width: 90 });
+
+                        doc.fillColor('#000000'); // Reset color
+
+                        currentY += 25;
+
+                        // ===== AUTHORIZATION & APPROVAL TRAIL SECTION =====
+                        doc.fontSize(11)
+                           .font('Helvetica-Bold')
+                           .fillColor('#0066cc')
+                           .text('AUTHORIZATION & APPROVAL TRAIL', 50, currentY);
+
+                        currentY += 20;
+
+                        // Approval trail details
+                        doc.fontSize(8)
+                           .font('Helvetica-Bold')
+                           .fillColor('#000000')
+                           .text('Initiated by:', 55, currentY)
+                           .font('Helvetica')
+                           .text(po.created_by_name || 'N/A', 140, currentY);
+
+                        currentY += 13;
+                        doc.font('Helvetica-Bold')
+                           .text('HOD Approval:', 55, currentY)
+                           .font('Helvetica')
+                           .text(po.hod_name || 'N/A', 140, currentY);
+
+                        currentY += 13;
+                        doc.font('Helvetica-Bold')
+                           .text('Finance Approval:', 55, currentY)
+                           .font('Helvetica')
+                           .text(po.finance_name || 'N/A', 140, currentY);
+
+                        currentY += 13;
+                        doc.font('Helvetica-Bold')
+                           .text('MD Approval:', 55, currentY)
+                           .font('Helvetica')
+                           .text(po.md_name || 'N/A', 140, currentY);
+
+                        currentY += 20;
+
+                        // Footer message
+                        doc.fontSize(8)
+                           .font('Helvetica-Oblique')
+                           .fillColor('#666666')
+                           .text('This document represents an officially approved purchase requisition.', 60, currentY, { align: 'center', width: 485 })
+                           .text('All authorizations have been verified through the system approval workflow.', 60, currentY + 10, { align: 'center', width: 485 });
+
+                        currentY += 25;
+                        doc.text(`Document generated on: ${new Date().toLocaleDateString('en-US', {weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'})} at ${new Date().toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'})}`, 60, currentY, { align: 'center', width: 485 })
+                           .text('KSB Zambia - Purchase Requisition Approval System (PRAS)', 60, currentY + 10, { align: 'center', width: 485 });
+
+                        doc.end();
+
+                        // Log PDF generation
+                        db.run(`
+                            INSERT INTO audit_log (requisition_id, user_id, action, details)
+                            VALUES (?, ?, 'approved_requisition_pdf_downloaded', ?)
+                        `, [po.requisition_id, user.id, `Approved Purchase Requisition PDF downloaded: ${po.req_number}`]);
+                    }); // Close db.all callback for requisition_items
 
             } catch (pdfError) {
                 logError(pdfError, { context: 'generate_po_pdf', po_id: poId });
@@ -1487,8 +1796,9 @@ app.get('/api/purchase-orders/:id/pdf', authenticate, (req, res, next) => {
 });
 
 
-// Generate Requisition PDF with role-based access control
-app.get('/api/requisitions/:id/pdf', authenticate, (req, res, next) => {
+// COMMENTED OUT: Generate DEPARTMENTAL REQUEST PDF (Report 2) - Not needed
+// This endpoint generates PDF after HOD approval (initiator -> HOD flow)
+/* app.get('/api/requisitions/:id/pdf', authenticate, (req, res, next) => {
     try {
         const reqId = parseInt(req.params.id);
         const user = req.user;
@@ -1768,7 +2078,7 @@ app.get('/api/requisitions/:id/pdf', authenticate, (req, res, next) => {
     } catch (error) {
         next(error);
     }
-});
+}); */
 
 
 // Get vendors
@@ -1803,7 +2113,8 @@ app.put('/api/requisitions/:id/procurement-update', authenticate, authorize('pro
         if (updateData.status !== undefined) { fields.push('status = ?'); values.push(updateData.status); }
         if (updateData.justification !== undefined) { fields.push('justification = ?'); values.push(updateData.justification); }
         if (updateData.urgency !== undefined) { fields.push('urgency = ?'); values.push(updateData.urgency); }
-        
+        if (updateData.tax_type !== undefined) { fields.push('tax_type = ?'); values.push(updateData.tax_type); }
+
         fields.push('updated_at = CURRENT_TIMESTAMP');
         values.push(reqId);
 
@@ -1841,7 +2152,8 @@ app.post('/api/requisitions/simple', authenticate, authorize('initiator', 'admin
             account_code,
             created_by,
             initiatorId,  // Frontend sends this
-            items = []  // Default to empty array
+            items = [],  // Default to empty array
+            tax_type = null  // Default to null - will be set by procurement
         } = req.body;
 
         // Determine the user ID from either field
@@ -1872,9 +2184,9 @@ app.post('/api/requisitions/simple', authenticate, authorize('initiator', 'admin
             const title = reqNumber;
 
             db.run(`
-                INSERT INTO requisitions (req_number, title, description, delivery_location, urgency, required_date, account_code, created_by, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft')
-            `, [reqNumber, title, description, delivery_location, urgency, required_date, account_code, userId], function(err) {
+                INSERT INTO requisitions (req_number, title, description, delivery_location, urgency, required_date, account_code, created_by, status, tax_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+            `, [reqNumber, title, description, delivery_location, urgency, required_date, account_code, userId, tax_type], function(err) {
                 if (err) {
                     console.error('Database error creating requisition:', err.message);
                     return next(new AppError(`Database error: ${err.message}`, 500));
@@ -2339,27 +2651,13 @@ app.get('/api/requisitions/:id/pdf', authenticate, (req, res, next) => {
                 });
             }
 
-            // Get items for the requisition with proper pricing
-            // Fallback to requisitions table pricing if items have zero prices
+            // Get items for the requisition
+            // Pricing now comes directly from items table (populated by triggers)
             db.all(`
                 SELECT ri.*,
-                       v.name as vendor_name,
-                       CASE
-                           WHEN ri.unit_price IS NULL OR ri.unit_price = 0
-                           THEN r.unit_price
-                           ELSE ri.unit_price
-                       END as unit_price,
-                       CASE
-                           WHEN ri.total_price IS NULL OR ri.total_price = 0
-                           THEN r.total_cost
-                           ELSE ri.total_price
-                       END as total_price,
-                       ri.quantity,
-                       ri.item_name,
-                       ri.specifications
+                       v.name as vendor_name
                 FROM requisition_items ri
                 LEFT JOIN vendors v ON ri.vendor_id = v.id
-                LEFT JOIN requisitions r ON ri.requisition_id = r.id
                 WHERE ri.requisition_id = ?
                 ORDER BY ri.id
             `, [reqId], (err, items) => {
@@ -3057,7 +3355,7 @@ app.get('/api/admin/stats', authenticate, authorize('admin'), (req, res, next) =
 app.get('/api/admin/users', authenticate, authorize('admin'), (req, res, next) => {
     try {
         db.all(`
-            SELECT id, username, full_name, email, role, department, created_at
+            SELECT id, username, full_name, email, role, department, assigned_hod, created_at
             FROM users
             ORDER BY created_at DESC
         `, (err, users) => {
@@ -3075,11 +3373,25 @@ app.get('/api/admin/users', authenticate, authorize('admin'), (req, res, next) =
 // Create new user
 app.post('/api/admin/users', authenticate, authorize('admin'), (req, res, next) => {
     try {
-        const { username, full_name, email, password, role, department } = req.body;
+        console.log('=== CREATE USER REQUEST ===');
+        console.log('Request body:', JSON.stringify(req.body, null, 2));
+
+        const { username, full_name, email, password, role, department, assigned_hod } = req.body;
+
+        console.log('Extracted fields:', { username, full_name, email, role, department, assigned_hod: assigned_hod ? 'present' : 'missing' });
 
         // Validation
         if (!username || !full_name || !password || !role) {
+            console.log('Validation failed: Required fields missing');
             return res.status(400).json({ error: 'Required fields missing' });
+        }
+
+        if (!department) {
+            return res.status(400).json({ error: 'Department is required' });
+        }
+
+        if (!assigned_hod) {
+            return res.status(400).json({ error: 'Assigned HOD is required' });
         }
 
         // Check if username exists
@@ -3092,14 +3404,25 @@ app.post('/api/admin/users', authenticate, authorize('admin'), (req, res, next) 
             const bcrypt = require('bcryptjs');
             const hashedPassword = bcrypt.hashSync(password, 10);
 
+            // Parse assigned_hod as integer
+            const assignedHodId = parseInt(assigned_hod, 10);
+
             db.run(`
-                INSERT INTO users (username, full_name, email, password, role, department)
-                VALUES (?, ?, ?, ?, ?, ?)
-            `, [username, full_name, email, hashedPassword, role, department], function(err) {
+                INSERT INTO users (username, full_name, email, password, role, department, assigned_hod)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `, [username, full_name, email, hashedPassword, role, department, assignedHodId], function(err) {
                 if (err) {
-                    logError(err, { context: 'create_user' });
-                    return next(new AppError('Failed to create user', 500));
+                    console.error('Error creating user:', err);
+                    logError(err, { context: 'create_user', username, role, department });
+                    return res.status(500).json({ error: 'Failed to create user: ' + err.message });
                 }
+
+                logSecurity('user_created', {
+                    admin_id: req.user.id,
+                    new_user_id: this.lastID,
+                    username,
+                    role
+                });
 
                 res.json({
                     success: true,
@@ -3109,6 +3432,7 @@ app.post('/api/admin/users', authenticate, authorize('admin'), (req, res, next) 
             });
         });
     } catch (error) {
+        console.error('Exception in create user:', error);
         next(error);
     }
 });
@@ -3117,13 +3441,33 @@ app.post('/api/admin/users', authenticate, authorize('admin'), (req, res, next) 
 app.put('/api/admin/users/:id', authenticate, authorize('admin'), (req, res, next) => {
     try {
         const userId = req.params.id;
-        const { full_name, email, role, department, password } = req.body;
+        console.log('=== UPDATE USER REQUEST ===');
+        console.log('User ID:', userId);
+        console.log('Request body:', JSON.stringify(req.body, null, 2));
+
+        const { full_name, email, role, department, assigned_hod, password } = req.body;
+
+        console.log('Extracted fields:', { full_name, email, role, department, assigned_hod: assigned_hod ? 'present' : 'missing', password: password ? 'present' : 'not provided' });
+
+        // Validation
+        if (!department) {
+            console.log('Validation failed: Department is required');
+            return res.status(400).json({ error: 'Department is required' });
+        }
+
+        if (!assigned_hod) {
+            console.log('Validation failed: Assigned HOD is required');
+            return res.status(400).json({ error: 'Assigned HOD is required' });
+        }
+
+        // Parse assigned_hod as integer
+        const assignedHodId = parseInt(assigned_hod, 10);
 
         let query = `
             UPDATE users
-            SET full_name = ?, email = ?, role = ?, department = ?
+            SET full_name = ?, email = ?, role = ?, department = ?, assigned_hod = ?
         `;
-        let params = [full_name, email, role, department];
+        let params = [full_name, email, role, department, assignedHodId];
 
         // If password is provided, update it
         if (password) {
@@ -3131,9 +3475,9 @@ app.put('/api/admin/users/:id', authenticate, authorize('admin'), (req, res, nex
             const hashedPassword = bcrypt.hashSync(password, 10);
             query = `
                 UPDATE users
-                SET full_name = ?, email = ?, role = ?, department = ?, password = ?
+                SET full_name = ?, email = ?, role = ?, department = ?, assigned_hod = ?, password = ?
             `;
-            params = [full_name, email, role, department, hashedPassword];
+            params = [full_name, email, role, department, assignedHodId, hashedPassword];
         }
 
         query += ` WHERE id = ?`;
@@ -3141,9 +3485,16 @@ app.put('/api/admin/users/:id', authenticate, authorize('admin'), (req, res, nex
 
         db.run(query, params, function(err) {
             if (err) {
+                console.error('Error updating user:', err);
                 logError(err, { context: 'update_user', user_id: userId });
-                return next(new AppError('Failed to update user', 500));
+                return res.status(500).json({ error: 'Failed to update user: ' + err.message });
             }
+
+            logSecurity('user_updated', {
+                admin_id: req.user.id,
+                updated_user_id: userId,
+                role
+            });
 
             res.json({
                 success: true,
@@ -3151,6 +3502,7 @@ app.put('/api/admin/users/:id', authenticate, authorize('admin'), (req, res, nex
             });
         });
     } catch (error) {
+        console.error('Exception in update user:', error);
         next(error);
     }
 });
@@ -3253,29 +3605,6 @@ app.delete('/api/admin/vendors/:id', authenticate, authorize('admin'), (req, res
                 success: true,
                 message: 'Vendor deleted successfully'
             });
-        });
-    } catch (error) {
-        next(error);
-    }
-});
-
-// ====== DEPARTMENT & BUDGET MANAGEMENT ======
-
-// Get all departments with budgets
-app.get('/api/admin/departments', authenticate, authorize('admin'), (req, res, next) => {
-    try {
-        db.all(`
-            SELECT DISTINCT department,
-                   (SELECT SUM(total_amount) FROM requisitions WHERE department = users.department AND status = 'completed') as spent
-            FROM users
-            WHERE department IS NOT NULL
-            ORDER BY department
-        `, (err, departments) => {
-            if (err) {
-                logError(err, { context: 'get_departments' });
-                return next(new AppError('Database error', 500));
-            }
-            res.json(departments || []);
         });
     } catch (error) {
         next(error);
@@ -3732,13 +4061,24 @@ app.post('/api/admin/reroute/:id', authenticate, authorize('admin'), (req, res, 
                 return res.status(404).json({ error: 'Target user not found' });
             }
 
-            // Update requisition status if provided
+            // Update requisition status and universal assignment
             let updateQuery = 'UPDATE requisitions SET updated_at = CURRENT_TIMESTAMP';
             const updateParams = [];
 
             if (new_status) {
                 updateQuery += ', status = ?';
                 updateParams.push(new_status);
+            }
+
+            // Set universal assignment fields for ALL roles
+            updateQuery += ', assigned_to = ?, assigned_role = ?';
+            updateParams.push(to_user_id);
+            updateParams.push(targetUser.role);
+
+            // Also set assigned_hod_id for backward compatibility
+            if (targetUser.role === 'hod') {
+                updateQuery += ', assigned_hod_id = ?';
+                updateParams.push(to_user_id);
             }
 
             updateQuery += ' WHERE id = ?';
@@ -3787,6 +4127,18 @@ setupFXAndBudgetRoutes(app, db, authenticate, authorize);
 
 const setupQuotesAndAdjudications = require('./routes/quotesAndAdjudications');
 setupQuotesAndAdjudications(app, db, authenticate, authorize);
+
+// ============================================
+// FORMS ROUTES (Expense Claims & EFT)
+// ============================================
+const formsRouter = require('./routes/forms');
+app.use('/api/forms', formsRouter);
+
+// ============================================
+// SEARCH ROUTES (Global Search)
+// ============================================
+const searchRouter = require('./routes/search');
+app.use('/api', searchRouter);
 
 // 404 handler - must be after all routes
 app.use(notFound);
